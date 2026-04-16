@@ -108,7 +108,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
     
     // Universally Portable Pipeline (stdout)
-    // Legacy NTLFlowLyzer/CICFlowMeter nomenclature mapping exactly to ML model features
+    // Legacy NTLFlowLyzer nomenclature mapping exactly to ML model features
     // We isolate bitwise flags in C dynamically: FIN, SYN, RST, PSH, ACK, URG
     printf("%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.4f\n",
             e->src_ip, e->dst_ip,
@@ -158,7 +158,7 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    // Header compatível com a Nomenclatura Padrão NTL/CIC original impresso globalmente no topo
+    // Header compatível com a Nomenclatura Padrão NTL original impresso globalmente no topo
     printf("src_ip,dst_ip,src_port,dst_port,protocol,tot_len_fwd_pkts,fwd_header_len,fin_flag_cnt,syn_flag_cnt,rst_flag_cnt,psh_flag_cnt,ack_flag_cnt,urg_flag_cnt,fwd_pkt_len_var\n");
 
     // 4. Asynchronous polling mechanism keeping daemon active
