@@ -24,7 +24,6 @@ struct flow_event_t {
 };
 
 static volatile bool exiting = false;
-FILE *csv_file = NULL;
 
 // Statistical Welford Component (Replaces the sluggish O(N) Python statistics.pvariance)
 struct welford_t {
@@ -108,21 +107,24 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         parse_dns_payload((void *)e->dns_payload_raw, e->payload_length);
     }
     
-    // Asynchronous O(1) Data Set Line Export (Appended to dataset_output.csv)
-    if (csv_file) {
-        // Formato base contendo o IP (32bits) Portas L4 e Variance calculada. 
-        // IPs são u32, idealmente usamos struct in_addr inet_ntoa, mas aqui mantemos inteiro pra agilidade ML
-        fprintf(csv_file, "%u,%u,%u,%u,%u,%u,%u,%u,%.4f\n",
-                e->src_ip, e->dst_ip,
-                e->src_port, e->dst_port,
-                e->protocol,
-                e->payload_length,
-                e->header_length,
-                e->tcp_flags,
-                get_variance(&dummy_variance_accumulator)
-        );
-        fflush(csv_file); // Evita Data Leakage caso o C crashe por power-loss
-    }
+    // Universally Portable Pipeline (stdout)
+    // Legacy NTLFlowLyzer/CICFlowMeter nomenclature mapping exactly to ML model features
+    // We isolate bitwise flags in C dynamically: FIN, SYN, RST, PSH, ACK, URG
+    printf("%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.4f\n",
+            e->src_ip, e->dst_ip,
+            e->src_port, e->dst_port,
+            e->protocol,
+            e->payload_length,
+            e->header_length,
+            (e->tcp_flags & 1),             // fin_flag_cnt
+            ((e->tcp_flags >> 1) & 1),      // syn_flag_cnt
+            ((e->tcp_flags >> 2) & 1),      // rst_flag_cnt
+            ((e->tcp_flags >> 3) & 1),      // psh_flag_cnt
+            ((e->tcp_flags >> 4) & 1),      // ack_flag_cnt
+            ((e->tcp_flags >> 5) & 1),      // urg_flag_cnt
+            get_variance(&dummy_variance_accumulator) // fwd_pkt_len_var
+    );
+    fflush(stdout); // Previne Data Leakage em buffers do pipe 
 
     return 0;
 }
@@ -156,25 +158,15 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    // 4. Initialization of Ground Truth CSV DataSet File
-    csv_file = fopen("dataset_output.csv", "w");
-    if (!csv_file) {
-        fprintf(stderr, ">> FATAL: Failed to open CSV file for Data Set output.\n");
-        goto cleanup;
-    }
-    // Write CSV Headers mathematically aligned to the ML training
-    fprintf(csv_file, "SrcIP_u32,DstIP_u32,SrcPort,DstPort,Protocol,PayloadLength,HeaderLength,TCPFlags,VarianceLevel\n");
+    // Header compatível com a Nomenclatura Padrão NTL/CIC original impresso globalmente no topo
+    printf("src_ip,dst_ip,src_port,dst_port,protocol,tot_len_fwd_pkts,fwd_header_len,fin_flag_cnt,syn_flag_cnt,rst_flag_cnt,psh_flag_cnt,ack_flag_cnt,urg_flag_cnt,fwd_pkt_len_var\n");
 
-    printf(">> eBPFNetFlowLyzer (Pure C Architecture) online.\n");
-    printf(">> Attaching active RingBuffer listener... Press Ctrl+C to terminate.\n");
-
-    // 5. Asynchronous polling mechanism keeping daemon active
+    // 4. Asynchronous polling mechanism keeping daemon active
     while (!exiting) {
         ring_buffer__poll(rb, 100); // Trigger waits 100ms max between loads
     }
 
 cleanup:
-    if (csv_file) fclose(csv_file);
     ring_buffer__free(rb);
     bpf_object__close(obj);
     return 0;
