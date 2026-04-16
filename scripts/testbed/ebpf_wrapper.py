@@ -76,7 +76,7 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
     start_time = time.time()
     
     try:
-        subprocess.run(["sudo", "tcpreplay", "-i", "lo", "-t", "-K", merged_pcap], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["sudo", "tcpreplay", "-i", "lo", "-t", merged_pcap], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
         print("   ⚠️ tcpreplay warned about loopback delivery, but BPF captured it.")
 
