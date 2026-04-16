@@ -23,7 +23,11 @@ def monitor_process(pid, output_csv, interval=1.0):
         print(f"❌ Process {pid} not found.")
         sys.exit(1)
 
-    print(f"🔍 Monitoring PID {pid} (Command: {' '.join(parent.cmdline()[:2])})...")
+    try:
+        cmdline = ' '.join(parent.cmdline()[:2])
+        print(f"🔍 Monitoring PID {pid} (Command: {cmdline})...")
+    except Exception:
+        print(f"🔍 Monitoring PID {pid} (Terminating / Zombie)...")
     
     metrics = []
     proc_cache = {}  # {pid: psutil.Process} — used for per-process RAM tracking
@@ -41,7 +45,11 @@ def monitor_process(pid, output_csv, interval=1.0):
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
-            while parent.is_running() and parent.status() != psutil.STATUS_ZOMBIE:
+            while True:
+                try:
+                    if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE: break
+                except Exception:
+                    break
                 time.sleep(interval)
 
                 # System-wide CPU: already normalized to 0-100% on any core count
@@ -50,7 +58,7 @@ def monitor_process(pid, output_csv, interval=1.0):
                 # Per-process RAM: discover children and sum RSS
                 try:
                     current_children = parent.children(recursive=True)
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     break
 
                 for p in current_children:

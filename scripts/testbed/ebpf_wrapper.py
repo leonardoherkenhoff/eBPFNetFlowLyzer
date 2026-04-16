@@ -48,15 +48,9 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
     os.makedirs(work_dir, exist_ok=True)
     os.makedirs(output_csv_dir, exist_ok=True)
 
-    # 1. Merge PCAPs (No need to chunk like NTLFlowLyzer did!)
-    merged_pcap = os.path.join(work_dir, "full.pcap")
     pcaps = glob.glob(os.path.join(input_pcap_dir, "*.pcap"))
     if not pcaps: return
     total_packets = get_packet_count(pcaps)
-    
-    if not os.path.exists(merged_pcap):
-        print("   Merging PCAPs for tcpreplay ingestion...")
-        run_cmd(f"mergecap -F pcap -w '{merged_pcap}' " + " ".join([f"'{p}'" for p in pcaps]))
 
     # 2. Invoke eBPF Loader on loopback and hook the Monitor
     loader_cmd = ["sudo", "./build/loader", "lo"]
@@ -71,14 +65,15 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
     import sys
     monitor_proc = subprocess.Popen([sys.executable, monitor_script, str(loader_proc.pid), monitor_csv])
 
-    # 3. Stream data via Hardware (tcpreplay ignores Linux Routing and sends raw to Interface)
-    print(f"   Streaming {total_packets} packets via tcpreplay directly to BPF Map (Top-Speed)...")
+    # 3. Stream data via Hardware (tcpreplay sequentially sends raw to Interface loopback)
+    print(f"   Streaming {total_packets} packets sequentially via tcpreplay directly to BPF Map (Top-Speed)...")
     start_time = time.time()
     
-    try:
-        subprocess.run(["sudo", "tcpreplay", "-i", "lo", "-t", merged_pcap], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        print("   ⚠️ tcpreplay warned about loopback delivery, but BPF captured it.")
+    for p in pcaps:
+        try:
+            subprocess.run(["sudo", "tcpreplay", "-i", "lo", "-t", p], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            pass
 
     end_time = time.time()
     elapsed = end_time - start_time
@@ -100,7 +95,6 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
             "pps": pps, "monitor_file": monitor_csv
         }, f, indent=4)
 
-    run_cmd(f"sudo rm -rf '{work_dir}'")
     print(f"✅ DONE: {total_packets} packets | {elapsed:.2f}s | {pps:.2f} pps")
 
 def run_extraction():
