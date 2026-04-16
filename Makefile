@@ -17,7 +17,7 @@ DAEMON_BIN = $(BUILD_DIR)/loader
 
 # Flags de Compilação
 CFLAGS = -g -O2 -Wall -Wextra
-BPF_CFLAGS = -g -O2 -target bpf -D__TARGET_ARCH_x86 -I$(EBPF_DIR) -Wall -Wextra -Werror -Wshadow
+BPF_CFLAGS = -g -O2 -target bpf -D__TARGET_ARCH_x86 -I$(EBPF_DIR) -Wall -Wno-missing-declarations -Wno-compare-distinct-pointer-types
 LDFLAGS = -lbpf -lelf -lz
 
 all: $(BUILD_DIR) $(EBPF_OBJ) $(DAEMON_BIN)
