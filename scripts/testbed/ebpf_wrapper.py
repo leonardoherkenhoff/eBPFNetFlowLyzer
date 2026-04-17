@@ -69,10 +69,9 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
     print(f"   Streaming {total_packets} packets sequentially via tcpreplay directly to BPF Map (Top-Speed)...")
     start_time = time.time()
     
+    for p in pcaps:
         try:
-            # Removed -t (Top-speed) to prevent tcpreplay from caching the entire massive PCAP into RAM.
-            # Using --topspeed (if supported) or linear reading to preserve server stability.
-            subprocess.run(["sudo", "tcpreplay", "-i", "lo", p], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["sudo", "tcpreplay", "-i", "lo", "-t", p], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             pass
 
