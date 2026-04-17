@@ -11,7 +11,7 @@ Calculates hardware-metrics synchronously with monitor.py.
 """
 
 # --- CONFIGURATION ---
-INPUT_DIR = "/home/leo/Documentos/IFES/PPComp/20252/CICDDoS2019/PCAP/01-12"
+INPUT_DIR = "/opt/eBPFNetFlowLyzer/data/raw/PCAP"
 OUTPUT_DIR = "./data/interim/EBPF_RAW"
 
 def get_packet_count(pcap_files):
