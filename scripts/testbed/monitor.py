@@ -96,12 +96,15 @@ def monitor_process(pid, output_csv, interval=1.0):
         max_ram = max(m['ram_mb'] for m in metrics)
         avg_ram = sum(m['ram_mb'] for m in metrics) / len(metrics)
         
-        print("\n📊 --- Monitoring Summary ---")
-        print(f"Max CPU Usage: {max_cpu}%")
-        print(f"Avg CPU Usage: {avg_cpu:.2f}%")
-        print(f"Max RAM Usage: {max_ram} MB")
-        print(f"Avg RAM Usage: {avg_ram:.2f} MB")
-        print(f"Data saved to {output_csv}")
+        print("\n" + "="*40)
+        print("📊 MONITORING SUMMARY")
+        print("="*40)
+        print(f"Max CPU Usage: {max_cpu:>6}%")
+        print(f"Avg CPU Usage: {avg_cpu:>6.2f}%")
+        print(f"Max RAM Usage: {max_ram:>6} MB")
+        print(f"Avg RAM Usage: {avg_ram:>6.2f} MB")
+        print(f"Data saved to: {output_csv}")
+        print("="*40)
 
         # Summary file beside CSV
         summary_file = output_csv.replace('.csv', '_summary.txt')

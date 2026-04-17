@@ -134,6 +134,7 @@ void parse_dns_metrics(struct flow_record *f, void *payload_data, size_t length)
 }
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
+    (void)ctx; (void)data_sz; // Silent unused warnings
     const struct flow_event_t *e = data;
     struct flow_record *f;
     struct flow_key k;
@@ -243,7 +244,7 @@ void export_all_flows() {
     HASH_ITER(hh, flows, f, tmp) {
         double duration_us = (double)(f->last_time - f->start_time) / 1000.0;
         
-        printf("%u,%u,%u,%u,%u,%llu,%.2f,%llu,%llu,%llu,%llu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%llu,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f\n",
+        printf("%u,%u,%u,%u,%u,%lu,%.2f,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f\n",
             f->key.src_ip, f->key.dst_ip,
             ntohs(f->key.src_port), ntohs(f->key.dst_port), f->key.protocol,
             f->start_time, duration_us,
