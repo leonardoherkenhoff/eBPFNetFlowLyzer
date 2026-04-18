@@ -46,6 +46,7 @@ struct flow_event_t {
     uint16_t header_length;
     uint8_t tcp_flags;
     uint8_t is_tunneled;
+    uint8_t sni_hostname[64];
     uint64_t timestamp_ns;
     uint8_t dns_payload_raw[256];
 };
@@ -148,6 +149,7 @@ struct flow_record {
     uint8_t fwd_flags;
     uint8_t bwd_flags;
     uint8_t is_tunneled;
+    char    sni_hostname[64];
     
     // DNS Meta-Extraction (Dissertation specific features)
     uint32_t dns_query_count;
@@ -229,6 +231,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         f->fwd_total_header = 0; f->bwd_total_header = 0;
         f->fwd_flags = 0; f->bwd_flags = 0;
         f->is_tunneled = e->is_tunneled;
+        memset(f->sni_hostname, 0, 64);
         f->dns_query_count = 0;
 
         welford_init(&f->fwd_len); welford_init(&f->bwd_len);
@@ -256,6 +259,9 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
             welford_update(&f->fwd_iat, delta);
         }
         f->fwd_last_time = e->timestamp_ns;
+        if (e->sni_hostname[0] != 0) {
+            strncpy(f->sni_hostname, (char *)e->sni_hostname, 63);
+        }
     } else {
         f->bwd_pkt_count++;
         f->bwd_total_bytes += e->payload_length;
@@ -287,7 +293,7 @@ void export_all_flows() {
     uint32_t exported = 0;
     
     // CSV Header (Master's thesis ground-truth compatible)
-    printf("src_ip,dst_ip,src_port,dst_port,protocol,is_tunneled,timestamp,flow_duration,tot_fwd_pkts,tot_bwd_pkts,tot_len_fwd_pkts,tot_len_bwd_pkts,fwd_pkt_len_max,fwd_pkt_len_min,fwd_pkt_len_mean,fwd_pkt_len_std,bwd_pkt_len_max,bwd_pkt_len_min,bwd_pkt_len_mean,bwd_pkt_len_std,flow_iat_mean,flow_iat_std,flow_iat_max,flow_iat_min,fwd_iat_mean,fwd_iat_std,fwd_iat_max,fwd_iat_min,bwd_iat_mean,bwd_iat_std,bwd_iat_max,bwd_iat_min,fwd_psh_flags,bwd_psh_flags,fwd_urg_flags,bwd_urg_flags,fwd_header_len,bwd_header_len,fin_flag_cnt,syn_flag_cnt,rst_flag_cnt,psh_flag_cnt,ack_flag_cnt,urg_flag_cnt,cwe_flag_cnt,ece_flag_cnt,dns_query_cont,dns_ttl_mean,dns_ttl_std\n");
+    printf("src_ip,dst_ip,src_port,dst_port,protocol,is_tunneled,sni_hostname,timestamp,flow_duration,tot_fwd_pkts,tot_bwd_pkts,tot_len_fwd_pkts,tot_len_bwd_pkts,fwd_pkt_len_max,fwd_pkt_len_min,fwd_pkt_len_mean,fwd_pkt_len_std,bwd_pkt_len_max,bwd_pkt_len_min,bwd_pkt_len_mean,bwd_pkt_len_std,flow_iat_mean,flow_iat_std,flow_iat_max,flow_iat_min,fwd_iat_mean,fwd_iat_std,fwd_iat_max,fwd_iat_min,bwd_iat_mean,bwd_iat_std,bwd_iat_max,bwd_iat_min,fwd_psh_flags,bwd_psh_flags,fwd_urg_flags,bwd_urg_flags,fwd_header_len,bwd_header_len,fin_flag_cnt,syn_flag_cnt,rst_flag_cnt,psh_flag_cnt,ack_flag_cnt,urg_flag_cnt,cwe_flag_cnt,ece_flag_cnt,dns_query_cont,dns_ttl_mean,dns_ttl_std\n");
 
     HASH_ITER(hh, flows, f, tmp) {
         double duration_us = (double)(f->last_time - f->start_time) / 1000.0;
@@ -302,9 +308,9 @@ void export_all_flows() {
             inet_ntop(AF_INET6, f->key.dst_ip, dst_str, INET6_ADDRSTRLEN);
         }
 
-        printf("%s,%s,%u,%u,%u,%u,%lu,%.2f,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f\n",
+        printf("%s,%s,%u,%u,%u,%u,%s,%lu,%.2f,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f\n",
             src_str, dst_str,
-            ntohs(f->key.src_port), ntohs(f->key.dst_port), f->key.protocol, f->is_tunneled,
+            ntohs(f->key.src_port), ntohs(f->key.dst_port), f->key.protocol, f->is_tunneled, f->sni_hostname,
             f->start_time, duration_us,
             f->fwd_pkt_count, f->bwd_pkt_count,
             f->fwd_total_bytes, f->bwd_total_bytes,
