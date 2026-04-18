@@ -46,8 +46,4 @@ $(DAEMON_BIN): $(DAEMON_DIR)/loader.c
 clean:
 	rm -rf $(BUILD_DIR)
 
-deep-clean: clean
-	rm -rf data/interim/*
-	rm -rf data/processed/*
-
-.PHONY: all clean deep-clean
+.PHONY: all clean
