@@ -340,27 +340,32 @@ void export_all_flows() {
     fprintf(stderr, "\n[Flush] Successfully exported %u flows to CSV.\n", exported);
 }
 
+#define MAX_INTERFACES 16
+static struct bpf_link *links[MAX_INTERFACES];
+static int link_count = 0;
+
 static void sig_handler(int sig) {
+    (void)sig;
     if (!exiting) {
         exiting = true;
         export_all_flows(); 
+        
+        for (int i = 0; i < link_count; i++) {
+            if (links[i]) bpf_link__destroy(links[i]);
+        }
+        
         exit(0);
     }
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <interface>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <iface1> [iface2] ... [ifaceN]\n", argv[0]);
         return 1;
     }
 
-    const char *iface = argv[1];
-    int ifindex = if_nametoindex(iface);
-    if (!ifindex) return 1;
-
     struct ring_buffer *rb = NULL;
     struct bpf_object *obj = NULL;
-    struct bpf_link *link = NULL;
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -369,19 +374,38 @@ int main(int argc, char **argv) {
     if (bpf_object__load(obj)) return 1;
 
     struct bpf_program *prog = bpf_object__find_program_by_name(obj, "xdp_prog");
-    link = bpf_program__attach_xdp(prog, ifindex);
-    if (libbpf_get_error(link)) goto cleanup;
+    
+    for (int i = 1; i < argc && link_count < MAX_INTERFACES; i++) {
+        const char *iface = argv[i];
+        int ifindex = if_nametoindex(iface);
+        if (!ifindex) {
+            fprintf(stderr, "[Error] Interface %s not found. Skipping.\n", iface);
+            continue;
+        }
+
+        struct bpf_link *link = bpf_program__attach_xdp(prog, ifindex);
+        if (libbpf_get_error(link)) {
+            fprintf(stderr, "[Error] Failed to attach to %s.\n", iface);
+            continue;
+        }
+        links[link_count++] = link;
+        fprintf(stderr, "[System] Attached to interface: %s (index %d)\n", iface, ifindex);
+    }
+
+    if (link_count == 0) {
+        fprintf(stderr, "[Fatal] Could not attach to any interface. Exiting.\n");
+        goto cleanup;
+    }
     
     int map_fd = bpf_object__find_map_fd_by_name(obj, "flows_ringbuf");
     rb = ring_buffer__new(map_fd, handle_event, NULL, NULL);
 
-    fprintf(stderr, "[System] Waiting for flows... Aggregating O(n) math gracefully.\n");
+    fprintf(stderr, "[System] Monitoring %d interfaces. Aggregating data plane events...\n", link_count);
     while (!exiting) {
         ring_buffer__poll(rb, 100); 
     }
 
 cleanup:
-    if (link) bpf_link__destroy(link);
     if (rb) ring_buffer__free(rb);
     bpf_object__close(obj);
     return 0;
