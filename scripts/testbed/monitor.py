@@ -1,3 +1,24 @@
+"""
+Hardware Resource Monitor for eBPFNetFlowLyzer
+----------------------------------------------
+This script performs high-frequency sampling of CPU and Memory (RAM) utilization
+during the network feature extraction benchmarks.
+
+Research Goals:
+1. Overhead Quantification: Measure the computational cost of the C-daemon 
+   and the eBPF Data Plane.
+2. Stability Validation: Monitor RAM usage over time to ensure no leaks 
+   occur in the User-Space flow table (LRU policy validation).
+3. Scalability metrics: Provide raw data (CSV) for plotting PPS vs. CPU usage.
+
+Sampling Logic:
+- Uses psutil to poll the target PID and its child processes recursively.
+- Normalizes CPU usage across all cores (0-100% scale).
+- Aggregates RSS (Resident Set Size) for accurate memory footprint measurement.
+
+Developed as part of the Master's Degree in Applied Computing research.
+"""
+
 import time
 import psutil
 import csv
@@ -7,30 +28,36 @@ import signal
 
 def monitor_process(pid, output_csv, interval=1.0):
     """
-    Monitors CPU and Memory usage of a process and its children.
-    Saves the data and reports the max/avg usage.
+    Monitors hardware metrics for a specific PID and its subtree.
+    
+    Args:
+        pid (int): Target process ID (usually the C-loader).
+        output_csv (str): Destination for the raw time-series metrics.
+        interval (float): Sampling frequency in seconds (default 1.0s).
     """
     def signal_handler(signum, frame):
-        print(f"\n📢 Received signal {signum}. Finalizing monitoring...")
+        print(f"\n📢 Resource Monitor: Received signal {signum}. Finalizing snapshots...")
         sys.exit(0)
 
+    # Handle graceful termination from the orchestrator (ebpf_wrapper.py)
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
         parent = psutil.Process(pid)
     except psutil.NoSuchProcess:
-        print(f"❌ Process {pid} not found.")
+        print(f"❌ Error: Target PID {pid} not found. Monitor exiting.")
         sys.exit(1)
 
     try:
         cmdline = ' '.join(parent.cmdline()[:2])
         print(f"🔍 Monitoring PID {pid} (Command: {cmdline})...")
     except Exception:
-        print(f"🔍 Monitoring PID {pid} (Terminating / Zombie)...")
+        print(f"🔍 Monitoring PID {pid} (Process state: Transient)...")
     
     metrics = []
-    proc_cache = {}  # {pid: psutil.Process} — used for per-process RAM tracking
+    # Cache for child process objects to reduce syscall overhead
+    proc_cache = {} 
     
     try:
         with open(output_csv, 'w', newline='') as csvfile:
@@ -38,7 +65,7 @@ def monitor_process(pid, output_csv, interval=1.0):
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
 
-            # Seed system-wide cpu_percent baseline (first call always returns 0.0)
+            # Initialize psutil CPU baseline (first call is discarded by library design)
             psutil.cpu_percent(interval=None)
             try:
                 proc_cache[parent.pid] = parent
@@ -47,15 +74,18 @@ def monitor_process(pid, output_csv, interval=1.0):
 
             while True:
                 try:
-                    if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE: break
+                    # Check if the process is still viable
+                    if not parent.is_running() or parent.status() == psutil.STATUS_ZOMBIE: 
+                        break
                 except Exception:
                     break
+                
                 time.sleep(interval)
 
-                # System-wide CPU: already normalized to 0-100% on any core count
+                # Capture System-wide normalized CPU impact
                 total_cpu = psutil.cpu_percent(interval=None)
 
-                # Per-process RAM: discover children and sum RSS
+                # Identify and aggregate memory usage for the entire process tree
                 try:
                     current_children = parent.children(recursive=True)
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -67,13 +97,16 @@ def monitor_process(pid, output_csv, interval=1.0):
 
                 total_ram_mb = 0.0
                 dead_pids = []
-                for pid, p in proc_cache.items():
+                for pid_key, p in proc_cache.items():
                     try:
+                        # Memory RSS conversion: Bytes -> MB
                         total_ram_mb += p.memory_info().rss / (1024 * 1024)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        dead_pids.append(pid)
-                for pid in dead_pids:
-                    del proc_cache[pid]
+                        dead_pids.append(pid_key)
+                
+                # Prune cache to keep polling performance O(n_processes)
+                for pid_key in dead_pids:
+                    del proc_cache[pid_key]
 
                 row = {
                     'timestamp': time.time(),
@@ -81,16 +114,17 @@ def monitor_process(pid, output_csv, interval=1.0):
                     'ram_mb': round(total_ram_mb, 2)
                 }
                 writer.writerow(row)
-                csvfile.flush()
+                csvfile.flush() # Ensure durability for long experiments
                 metrics.append(row)
                 
     except KeyboardInterrupt:
-        print("\n🛑 Monitoring interrupted.")
+        print("\n🛑 Resource Monitor: Interrupted by user.")
     finally:
         if not metrics:
-            print("⚠️ No metrics collected.")
+            print("⚠️ Monitor: No metrics were collected before shutdown.")
             return
 
+        # Statistical summary calculation for dissertation tables
         max_cpu = max(m['cpu_percent'] for m in metrics)
         avg_cpu = sum(m['cpu_percent'] for m in metrics) / len(metrics)
         max_ram = max(m['ram_mb'] for m in metrics)
@@ -106,7 +140,7 @@ def monitor_process(pid, output_csv, interval=1.0):
         print(f"Data saved to: {output_csv}")
         print("="*40)
 
-        # Summary file beside CSV
+        # Persistence of summary metrics for automated parsing
         summary_file = output_csv.replace('.csv', '_summary.txt')
         with open(summary_file, 'w') as f:
             f.write(f"Max_CPU_Percent={max_cpu}\n")
@@ -116,10 +150,10 @@ def monitor_process(pid, output_csv, interval=1.0):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Monitor process CPU/RAM over time")
-    parser.add_argument("pid", type=int, help="PID of the process to monitor")
-    parser.add_argument("output", type=str, help="Output CSV file path")
-    parser.add_argument("--interval", type=float, default=1.0, help="Monitoring interval in seconds")
+    parser = argparse.ArgumentParser(description="eBPFNetFlowLyzer Resource Monitor")
+    parser.add_argument("pid", type=int, help="Target PID (C-daemon)")
+    parser.add_argument("output", type=str, help="Output CSV path")
+    parser.add_argument("--interval", type=float, default=1.0, help="Sampling interval (sec)")
     
     args = parser.parse_args()
     monitor_process(args.pid, args.output, args.interval)
