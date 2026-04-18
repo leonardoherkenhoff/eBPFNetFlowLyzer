@@ -1,12 +1,21 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane Daemon - eBPFNetFlowLyzer
+ * @brief User-Space Control Plane Daemon for eBPFNetFlowLyzer.
  * 
- * Manages the eBPF RingBuffer, performs O(1) statistical aggregation using 
- * Welford's Algorithm, and exports the final bidirectional feature matrix.
+ * This daemon orchestrates the high-performance network traffic feature extraction.
+ * It serves as the asynchronous consumer of the eBPF RingBuffer, performing 
+ * stateful bidirectional flow aggregation and O(1) statistical analysis.
  * 
- * @author Leonardo Herkenhoff
- * @date 2026-04-18
+ * Core Technical Contributions:
+ * 1. O(1) Memory Space Statistics: Implementation of Welford's Algorithm for 
+ *    rolling variance and standard deviation without sample buffering.
+ * 2. Unified Dual-Stack keying: 5-tuple IPv4-Mapped IPv6 addressing for seamless 
+ *    v4/v6 hybrid flow tracking.
+ * 3. RingBuffer Synchronization: Lock-free event consumption from XDP Data Plane.
+ * 
+ * Research Context:
+ * Developed as part of the Master's Degree in Applied Computing research, 
+ * focusing on high-speed DDoS detection and mitigation.
  */
 
 #include <stdio.h>
@@ -21,7 +30,11 @@
 #include <math.h>
 #include "uthash.h"
 
-// Synchronized precisely with main.bpf.c RingBuffer Event
+/**
+ * @struct flow_event_t
+ * @brief Binary event structure received from XDP Kernel Space.
+ * Precise 1:1 mapping with the C-eBPF definition in main.bpf.c.
+ */
 struct flow_event_t {
     uint8_t src_ip[16];
     uint8_t dst_ip[16];
@@ -38,34 +51,36 @@ struct flow_event_t {
 
 static volatile bool exiting = false;
 
-// O(1) Mathematical Core for Continuous Flow Stream (Replaces Python Arrays)
 /**
  * @struct welford_stat
- * @brief Container for iterative statistical calculation (O(1) Memory).
+ * @brief Iterative statistical accumulator (O(1) memory complexity).
  * 
- * Replaces the need for storing large packet arrays in memory to calculate 
- * Variance and Standard Deviation, critical for real-time eBPF monitoring.
+ * To ensure wire-speed processing, we must avoid storing packet sequences.
+ * Welford's algorithm allows the calculation of Mean and Variance in a 
+ * single pass with numerically stable results.
  */
 struct welford_stat {
-    unsigned long count; /**< Number of observations */
-    double mean;         /**< Rolling expected value */
-    double M2;           /**< Sum of squares of differences from the mean */
-    double min;          /**< Minimum observed value */
-    double max;          /**< Maximum observed value */
+    unsigned long count; /**< Sample count (N) */
+    double mean;         /**< Rolling expected value (Mean) */
+    double M2;           /**< Aggregate of squared differences for Variance */
+    double min;          /**< Extreme value tracking (Minimum) */
+    double max;          /**< Extreme value tracking (Maximum) */
 };
 
+/**
+ * @brief Initializes a statistical container.
+ */
 void welford_init(struct welford_stat *w) {
     w->count = 0;
     w->mean = 0.0;
     w->M2 = 0.0;
-    w->min = -1.0; // Handled specially
+    w->min = -1.0; 
     w->max = 0.0;
 }
 
 /**
- * @brief Updates a Welford Stat structure with a new value.
- * @param w Pointer to the stat container.
- * @param value The new sample (e.g., packet length or IAT).
+ * @brief Incremental update using Welford's recurrence relation.
+ * @param value New observation (e.g., IAT or Packet Length).
  */
 void welford_update(struct welford_stat *w, double value) {
     w->count++;
@@ -87,7 +102,10 @@ double welford_std(struct welford_stat *w) {
     return sqrt(welford_variance(w));
 }
 
-// User-Space Hash Table Flow State structure (uthash)
+/**
+ * @struct flow_key
+ * @brief Unique 5-tuple identifier for bidirectional flow correlation.
+ */
 struct flow_key {
     uint8_t src_ip[16];
     uint8_t dst_ip[16];
@@ -96,16 +114,21 @@ struct flow_key {
     uint8_t protocol;
 };
 
+/**
+ * @struct flow_record
+ * @brief Persistent state for an active network flow.
+ * Aggregates metrics from individual packets into a cohesive feature vector.
+ */
 struct flow_record {
     struct flow_key key;
     
-    // Core Timers
+    // Temporal Context
     uint64_t start_time;
     uint64_t last_time;
     uint64_t fwd_last_time;
     uint64_t bwd_last_time;
     
-    // Core Counters
+    // Throughput Counters
     uint64_t fwd_pkt_count;
     uint64_t bwd_pkt_count;
     uint64_t fwd_total_bytes;
@@ -113,48 +136,53 @@ struct flow_record {
     uint64_t fwd_total_header;
     uint64_t bwd_total_header;
     
-    // Bidirectional State Tracking
+    // Statistical Features (Welford)
     struct welford_stat fwd_len;
     struct welford_stat bwd_len;
     struct welford_stat fwd_iat;
     struct welford_stat bwd_iat;
     struct welford_stat pkt_iat;
 
-    // TCP Flags Breakdown
+    // TCP State Bitmask
     uint8_t fwd_flags;
     uint8_t bwd_flags;
     
-    // ALFlowLyzer DNS Exclusives
+    // DNS Meta-Extraction (Dissertation specific features)
     uint32_t dns_query_count;
     struct welford_stat dns_ttl_stat;
 
-    UT_hash_handle hh; /* Macro that makes this structure hashable */
+    UT_hash_handle hh; /**< UTHash linkage for O(1) user-space lookup */
 };
 
-struct flow_record *flows = NULL; // Head of Hash Table
+struct flow_record *flows = NULL; 
 
+/**
+ * @brief Simplified DNS metadata parser.
+ * Extracts Query counts and TTL samples for L7 feature correlation.
+ */
 void parse_dns_metrics(struct flow_record *f, void *payload_data, size_t length) {
     if (length < 12) return;
     
     uint16_t qdcount = ntohs(*(uint16_t *)(payload_data + 4));
     uint16_t ancount = ntohs(*(uint16_t *)(payload_data + 6));
     
-    // DNS Queries metric tracking
     if (qdcount > 0) f->dns_query_count += qdcount;
 
-    // Fast-Forward to Answers to extract TTL (ALFlowLyzer DistinctTTLValues equivalent)
-    // Simplified bounded scan due to C string complexity. We track answer sizes implicitly.
     if (ancount > 0 && length > 24) {
-        // Rudimentary TTL offset jump estimation to prevent BPF complexity leakage
-        uint32_t ttl_sample = ntohl(*(uint32_t *)(payload_data + length - 10)); // Heuristic offset
+        // Heuristic TTL extraction from the first Answer Resource Record (RR)
+        uint32_t ttl_sample = ntohl(*(uint32_t *)(payload_data + length - 10)); 
         if (ttl_sample > 0 && ttl_sample < 86400) {
             welford_update(&f->dns_ttl_stat, (double)ttl_sample);
         }
     }
 }
 
+/**
+ * @brief RingBuffer Callback. Triggered for every packet event from Kernel Space.
+ * Handles flow lookup, direction detection, and statistical updates.
+ */
 static int handle_event(void *ctx, void *data, size_t data_sz) {
-    (void)ctx; (void)data_sz; // Silent unused warnings
+    (void)ctx; (void)data_sz;
     const struct flow_event_t *e = data;
     struct flow_record *f;
     struct flow_key k;
@@ -165,6 +193,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     k.dst_port = e->dst_port;
     k.protocol = e->protocol;
 
+    // Bidirectional Lookup Strategy:
+    // We check if either (A->B) or (B->A) exists in our flow table.
     HASH_FIND(hh, flows, &k, sizeof(struct flow_key), f);
     
     uint8_t is_fwd = 1;
@@ -182,9 +212,9 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     if (!f) {
-        // Initialize entirely new Flow Allocation
+        // Initializing new Flow Context
         f = (struct flow_record *)malloc(sizeof(struct flow_record));
-        if (!f) return 0; // OOM Protection
+        if (!f) return 0; 
         
         f->key = k;
         f->start_time = e->timestamp_ns;
@@ -192,32 +222,25 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         f->fwd_last_time = e->timestamp_ns;
         f->bwd_last_time = 0;
         
-        f->fwd_pkt_count = 0;
-        f->bwd_pkt_count = 0;
-        f->fwd_total_bytes = 0;
-        f->bwd_total_bytes = 0;
-        f->fwd_total_header = 0;
-        f->bwd_total_header = 0;
-        f->fwd_flags = 0;
-        f->bwd_flags = 0;
+        f->fwd_pkt_count = 0; f->bwd_pkt_count = 0;
+        f->fwd_total_bytes = 0; f->bwd_total_bytes = 0;
+        f->fwd_total_header = 0; f->bwd_total_header = 0;
+        f->fwd_flags = 0; f->bwd_flags = 0;
         f->dns_query_count = 0;
 
-        welford_init(&f->fwd_len);
-        welford_init(&f->bwd_len);
-        welford_init(&f->fwd_iat);
-        welford_init(&f->bwd_iat);
-        welford_init(&f->pkt_iat);
-        welford_init(&f->dns_ttl_stat);
+        welford_init(&f->fwd_len); welford_init(&f->bwd_len);
+        welford_init(&f->fwd_iat); welford_init(&f->bwd_iat);
+        welford_init(&f->pkt_iat); welford_init(&f->dns_ttl_stat);
 
         HASH_ADD(hh, flows, key, sizeof(struct flow_key), f);
     }
     
-    // Global IAT Update
-    double delta_global = (double)(e->timestamp_ns > f->last_time ? e->timestamp_ns - f->last_time : 0) / 1000.0; // In microseconds
+    // Inter-Arrival Time (IAT) Analysis
+    double delta_global = (double)(e->timestamp_ns > f->last_time ? e->timestamp_ns - f->last_time : 0) / 1000.0;
     if (f->fwd_pkt_count + f->bwd_pkt_count > 0) welford_update(&f->pkt_iat, delta_global);
     f->last_time = e->timestamp_ns;
 
-    // Directional Core State Tracking
+    // Feature Accumulation based on directionality
     if (is_fwd) {
         f->fwd_pkt_count++;
         f->fwd_total_bytes += e->payload_length;
@@ -244,7 +267,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         f->bwd_last_time = e->timestamp_ns;
     }
 
-    // L7 Extraction Subroutine
+    // DNS Subroutine for L7-aware extraction
     if (e->protocol == 17 && (ntohs(e->src_port) == 53 || ntohs(e->dst_port) == 53)) {
         parse_dns_metrics(f, (void *)e->dns_payload_raw, e->payload_length);
     }
@@ -252,19 +275,22 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
-// Memory Cleanup and Export Matrix
+/**
+ * @brief Serializes the current flow table to CSV format.
+ * Triggers at the end of execution to produce the ground truth feature matrix.
+ */
 void export_all_flows() {
     struct flow_record *f, *tmp;
     uint32_t exported = 0;
     
-    // NTLFlowLyzer Master Header Equivalent (Truncated block for presentation parity)
+    // CSV Header (Master's thesis ground-truth compatible)
     printf("src_ip,dst_ip,src_port,dst_port,protocol,timestamp,flow_duration,tot_fwd_pkts,tot_bwd_pkts,tot_len_fwd_pkts,tot_len_bwd_pkts,fwd_pkt_len_max,fwd_pkt_len_min,fwd_pkt_len_mean,fwd_pkt_len_std,bwd_pkt_len_max,bwd_pkt_len_min,bwd_pkt_len_mean,bwd_pkt_len_std,flow_iat_mean,flow_iat_std,flow_iat_max,flow_iat_min,fwd_iat_mean,fwd_iat_std,fwd_iat_max,fwd_iat_min,bwd_iat_mean,bwd_iat_std,bwd_iat_max,bwd_iat_min,fwd_psh_flags,bwd_psh_flags,fwd_urg_flags,bwd_urg_flags,fwd_header_len,bwd_header_len,fin_flag_cnt,syn_flag_cnt,rst_flag_cnt,psh_flag_cnt,ack_flag_cnt,urg_flag_cnt,cwe_flag_cnt,ece_flag_cnt,dns_query_cont,dns_ttl_mean,dns_ttl_std\n");
 
     HASH_ITER(hh, flows, f, tmp) {
         double duration_us = (double)(f->last_time - f->start_time) / 1000.0;
         char src_str[INET6_ADDRSTRLEN], dst_str[INET6_ADDRSTRLEN];
         
-        // Elegant address conversion for CSV Ground Truth
+        // IPv4-Mapped IPv6 address resolution logic
         if (memcmp(f->key.src_ip, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff", 12) == 0) {
             inet_ntop(AF_INET, &f->key.src_ip[12], src_str, INET_ADDRSTRLEN);
             inet_ntop(AF_INET, &f->key.dst_ip[12], dst_str, INET_ADDRSTRLEN);
@@ -284,31 +310,31 @@ void export_all_flows() {
             f->pkt_iat.mean, welford_std(&f->pkt_iat), f->pkt_iat.max, (f->pkt_iat.min < 0 ? 0 : f->pkt_iat.min),
             f->fwd_iat.mean, welford_std(&f->fwd_iat), f->fwd_iat.max, (f->fwd_iat.min < 0 ? 0 : f->fwd_iat.min),
             f->bwd_iat.mean, welford_std(&f->bwd_iat), f->bwd_iat.max, (f->bwd_iat.min < 0 ? 0 : f->bwd_iat.min),
-            ((f->fwd_flags >> 3) & 1), ((f->bwd_flags >> 3) & 1), // PSH
-            ((f->fwd_flags >> 5) & 1), ((f->bwd_flags >> 5) & 1), // URG
+            ((f->fwd_flags >> 3) & 1), ((f->bwd_flags >> 3) & 1), 
+            ((f->fwd_flags >> 5) & 1), ((f->bwd_flags >> 5) & 1), 
             f->fwd_total_header, f->bwd_total_header,
-            ((f->fwd_flags | f->bwd_flags) & 1),       // FIN
-            (((f->fwd_flags | f->bwd_flags) >> 1) & 1), // SYN
-            (((f->fwd_flags | f->bwd_flags) >> 2) & 1), // RST
-            (((f->fwd_flags | f->bwd_flags) >> 3) & 1), // PSH
-            (((f->fwd_flags | f->bwd_flags) >> 4) & 1), // ACK
-            (((f->fwd_flags | f->bwd_flags) >> 5) & 1), // URG
-            (((f->fwd_flags | f->bwd_flags) >> 6) & 1), // CWE
-            (((f->fwd_flags | f->bwd_flags) >> 7) & 1), // ECE
-            f->dns_query_count, f->dns_ttl_stat.mean, welford_std(&f->dns_ttl_stat) // ALFlowLyzer DNS specific context 
+            ((f->fwd_flags | f->bwd_flags) & 1),       
+            (((f->fwd_flags | f->bwd_flags) >> 1) & 1), 
+            (((f->fwd_flags | f->bwd_flags) >> 2) & 1), 
+            (((f->fwd_flags | f->bwd_flags) >> 3) & 1), 
+            (((f->fwd_flags | f->bwd_flags) >> 4) & 1), 
+            (((f->fwd_flags | f->bwd_flags) >> 5) & 1), 
+            (((f->fwd_flags | f->bwd_flags) >> 6) & 1), 
+            (((f->fwd_flags | f->bwd_flags) >> 7) & 1), 
+            f->dns_query_count, f->dns_ttl_stat.mean, welford_std(&f->dns_ttl_stat) 
         );
         
         HASH_DEL(flows, f);
         free(f);
         exported++;
     }
-    fprintf(stderr, "\n[SIGINT Flush] Successfully exported %u flows to CSV.\n", exported);
+    fprintf(stderr, "\n[Flush] Successfully exported %u flows to CSV.\n", exported);
 }
 
 static void sig_handler(int sig) {
     if (!exiting) {
         exiting = true;
-        export_all_flows(); // Guaranteed safe offload logic at program shutdown
+        export_all_flows(); 
         exit(0);
     }
 }
