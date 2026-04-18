@@ -1,12 +1,19 @@
 /**
  * @file main.bpf.c
- * @brief Data Plane Core - eBPFNetFlowLyzer
+ * @brief Data Plane Core - eBPFNetFlowLyzer (Kernel-Space)
  * 
- * Intercepts network traffic at the NIC Driver level via XDP hooks.
- * Implements a Dual-Stack (IPv4/IPv6) stateful flow extraction engine.
+ * This program implements the high-performance packet interception engine using 
+ * XDP (eXpress Data Path). It operates at the earliest point in the Linux network 
+ * stack (NIC Driver level), enabling wire-speed feature extraction.
  * 
- * @author Leonardo Herkenhoff (Scientific Research Partner)
- * @date 2026-04-18
+ * Core Functionalities:
+ * 1. Dual-Stack Unified Parser: Handles IPv4 and IPv6 through a 128-bit key mapping.
+ * 2. Stateful Tracking: Uses BPF Maps (LRU_HASH) for flow accounting.
+ * 3. Asynchronous Telemetry: Dispatches flow events to User-Space via RingBuffer.
+ * 
+ * Research Context:
+ * Developed for DDoS detection and mitigation research (Master's Degree).
+ * Optimized for high-throughput (PPS) and minimal latency.
  */
 
 #include "vmlinux.h"
@@ -27,37 +34,35 @@
 #endif
 
 /** 
- * @def MAX_ENTRIES
- * @brief Robust Connection Table limit for handling high-volume DDoS peaks.
+ * @brief Connection Table capacity. 
+ * Tuned to handle massive DDoS attack vectors without excessive memory pressure.
  */
-#define MAX_ENTRIES 131072 // Robust Connection Table limit for handling DDoS peaks
+#define MAX_ENTRIES 131072 
 
 /**
  * @struct flow_event_t
- * @brief Telemetry structure transmitted to the User-Space RingBuffer.
- * 
- * Stores the core features extracted from each packet before statistical aggregation.
- * @note IPs are stored as 128-bit arrays to support IPv4-Mapped IPv6 (::ffff:0:0/96).
+ * @brief Transfer structure for User-Space synchronization.
+ * Contains raw metrics extracted from the L3/L4/L7 headers.
  */
 struct flow_event_t {
-    __u8 src_ip[16];   /**< 128-bit Source Address */
-    __u8 dst_ip[16];   /**< 128-bit Destination Address */
-    __u16 src_port;    /**< L4 Source Port */
-    __u16 dst_port;    /**< L4 Destination Port */
-    __u8 protocol;     /**< IP Protocol (TCP/UDP) */
-    __u8 ip_ver;       /**< IP Version Helper (4 or 6) */
+    __u8 src_ip[16];   /**< 128-bit address (IPv6 or IPv4-mapped) */
+    __u8 dst_ip[16];   /**< 128-bit address (IPv6 or IPv4-mapped) */
+    __u16 src_port;    
+    __u16 dst_port;    
+    __u8 protocol;     
+    __u8 ip_ver;       
     
-    __u16 payload_length; /**< Length of L4 Payload data */
-    __u16 header_length;  /**< Length of L3+L4 headers */
-    __u8 tcp_flags;       /**< Bitmap of tracked TCP flags (FIN|SYN|RST|PSH|ACK|URG) */
-    __u64 timestamp_ns;   /**< Monotonic timestamp in nanoseconds */
+    __u16 payload_length; 
+    __u16 header_length;  
+    __u8 tcp_flags;       /**< Tracked: FIN, SYN, RST, PSH, ACK, URG */
+    __u64 timestamp_ns;   /**< Monotonic timestamp for IAT calculation */
 
-    __u8 dns_payload_raw[256]; /**< Raw DNS payload buffer for L7 extraction */
+    __u8 dns_payload_raw[256]; /**< L7 buffer for DNS metadata extraction */
 };
 
 /**
  * @struct flow_key_t
- * @brief 5-tuple lookup key for BPF Maps.
+ * @brief The 5-tuple key for stateful flow correlation.
  */
 struct flow_key_t {
     __u8 src_ip[16];
@@ -67,6 +72,10 @@ struct flow_key_t {
     __u8 protocol;
 };
 
+/**
+ * @struct flow_stats_t
+ * @brief Atomic counters for in-kernel flow accounting.
+ */
 struct flow_stats_t {
     __u64 total_bytes;
     __u64 packet_count;
@@ -74,27 +83,36 @@ struct flow_stats_t {
     __u64 last_time_ns;
 };
 
-// 2. Maps Requested by the "Architecture Blueprint"
-struct {
-    __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024); // Requires heavy throughput. (256 KB)
-} flows_ringbuf SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH); // Replaces the slow Python dictionaries
-    __uint(max_entries, MAX_ENTRIES);
-    __type(key, struct flow_key_t);      // 5-tuple key form
-    __type(value, struct flow_stats_t);  // Atomic accounting for bytes and packets
-} flow_state_cache SEC(".maps");
+/* --- BPF MAP DEFINITIONS --- */
 
 /**
- * @brief Main XDP Program Entry Point
+ * @brief High-performance RingBuffer for asynchronous telemetry dispatch.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 256 * 1024); 
+} flows_ringbuf SEC(".maps");
+
+/**
+ * @brief Stateful cache for active flows. 
+ * Replaces traditional user-space tracking with O(1) kernel-level lookups.
+ * Uses LRU eviction policy to survive massive connection floods.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAX_ENTRIES);
+    __type(key, struct flow_key_t);
+    __type(value, struct flow_stats_t);
+} flow_state_cache SEC(".maps");
+
+/* --- DATA PLANE LOGIC --- */
+
+/**
+ * @brief XDP Entry Point.
  * 
- * Parsed Ethernet, IP, and L4 headers with strict boundary checks to satisfy
- * the eBPF Verifier. Implements Dual-Stack address mapping for O(1) flow state tracking.
- * 
- * @param ctx Pointer to the XDP metadata context.
- * @return XDP_PASS to allow the packet to the stack, as we are a passive extractor.
+ * This function is executed for every packet arriving at the NIC.
+ * It performs rigorous boundary checks to satisfy the eBPF Verifier
+ * while maintaining a lock-free, zero-copy architecture.
  */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
@@ -111,14 +129,15 @@ int xdp_prog(struct xdp_md *ctx) {
     __u8 l4_proto = 0;
     struct flow_key_t search_key = {0};
 
-    // L3 Parser (Unified Dual-Stack)
+    // --- L3 Header Parsing ---
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = (void *)(eth + 1);
         if ((void *)(ip + 1) > data_end) return XDP_PASS;
         ip_ver = 4;
         l4_proto = ip->protocol;
         
-        // IPv4-Mapped IPv6: ::ffff:a.b.c.d
+        // IPv4-Mapped IPv6: Transcoding for unified 128-bit keying
+        // Format: ::ffff:a.b.c.d
         src_ip[10] = 0xff; src_ip[11] = 0xff;
         *(__u32 *)&src_ip[12] = ip->saddr;
         
@@ -130,18 +149,21 @@ int xdp_prog(struct xdp_md *ctx) {
         if ((void *)(ip6 + 1) > data_end) return XDP_PASS;
         ip_ver = 6;
         l4_proto = ip6->nexthdr;
+        // Memory-safe read of 128-bit IPv6 addresses
         bpf_probe_read_kernel(src_ip, 16, &ip6->saddr);
         bpf_probe_read_kernel(dst_ip, 16, &ip6->daddr);
     } else {
         return XDP_PASS;
     }
 
+    // --- L4 Header Parsing ---
     __u16 l4_payload_len = 0;
     __u16 l4_header_len = 0;
     __u16 tcp_flags_tracked = 0;
     __u16 sport = 0, dport = 0;
     void *l4_header = NULL;
 
+    // Calculate L4 offset based on IP version (considering IPv4 Options)
     if (ip_ver == 4) {
         struct iphdr *ip = (void *)(eth + 1);
         l4_header = (void *)ip + (ip->ihl * 4);
@@ -185,7 +207,7 @@ int xdp_prog(struct xdp_md *ctx) {
         return XDP_PASS;
     }
 
-    // Unified Hash Table Lookup
+    // --- Stateful Flow Correlation ---
     __builtin_memcpy(search_key.src_ip, src_ip, 16);
     __builtin_memcpy(search_key.dst_ip, dst_ip, 16);
     search_key.src_port = sport;
@@ -194,6 +216,7 @@ int xdp_prog(struct xdp_md *ctx) {
 
     struct flow_stats_t *stats = bpf_map_lookup_elem(&flow_state_cache, &search_key);
     if (stats) {
+        // Atomic updates to ensure data integrity during parallel core execution
         __sync_fetch_and_add(&stats->total_bytes, l4_payload_len);
         __sync_fetch_and_add(&stats->packet_count, 1);
         stats->last_time_ns = bpf_ktime_get_ns();
@@ -206,13 +229,12 @@ int xdp_prog(struct xdp_md *ctx) {
         bpf_map_update_elem(&flow_state_cache, &search_key, &new_stats, BPF_ANY);
     }
 
-    // Reserve RingBuf for safe asynchronous transmission to User-Space
+    // --- Telemetry Dispatch (RingBuffer) ---
     struct flow_event_t *event;
     event = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*event), 0);
     if (!event)
-        return XDP_PASS; // Queue full - Apply Backpressure (Drop temporary stat)
+        return XDP_PASS; 
 
-    // Agreggate Event Metadata
     __builtin_memcpy(event->src_ip, src_ip, 16);
     __builtin_memcpy(event->dst_ip, dst_ip, 16);
     event->src_port = sport;
@@ -221,10 +243,11 @@ int xdp_prog(struct xdp_md *ctx) {
     event->ip_ver = ip_ver;
     event->tcp_flags = tcp_flags_tracked;
     event->payload_length = l4_payload_len;
-    event->header_length = l4_header_len; // Simplified for Dual-Stack
+    event->header_length = l4_header_len;
     event->timestamp_ns = bpf_ktime_get_ns();
     
-    // DNS Handling (L7 Payload push)
+    // --- L7 Meta-Extraction Subroutine ---
+    // Specifically targets DNS traffic for high-layer feature correlation
     if (l4_proto == IPPROTO_UDP && (bpf_ntohs(sport) == 53 || bpf_ntohs(dport) == 53)) {
         struct udphdr *udp = l4_header;
         void *payload = (void *)(udp + 1);
@@ -236,7 +259,7 @@ int xdp_prog(struct xdp_md *ctx) {
         }
     }
     
-    bpf_ringbuf_submit(event, 0); // Dispatches event to user-space poller
+    bpf_ringbuf_submit(event, 0); 
 
     return XDP_PASS;
 }
