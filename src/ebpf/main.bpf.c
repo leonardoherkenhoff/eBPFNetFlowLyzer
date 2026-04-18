@@ -33,7 +33,8 @@ struct flow_event_t {
     __u16 header_length;  
     __u8 tcp_flags;       
     __u8 is_tunneled;     
-    __u8 sni_hostname[64];
+    __u8 sni_hostname[64]; 
+    __u8 _pad[6];         /**< Explicit alignment padding */
     __u64 timestamp_ns;   
     __u8 dns_payload_raw[256]; 
 };
@@ -44,6 +45,13 @@ struct {
     __type(key, __u32);
     __type(value, __u64);
 } drop_counter SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} raw_pkt_count SEC(".maps");
 
 struct flow_key_t {
     __u8 src_ip[16];
@@ -164,8 +172,18 @@ int xdp_prog(struct xdp_md *ctx) {
     __u8 src_ip[16] = {0}, dst_ip[16] = {0}, sni[64] = {0};
     void *l3_hdr = (void *)(eth + 1), *l4_hdr = NULL;
 
-    if (parse_l3(l3_hdr, data_end, eth->h_proto, src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0)
+    if (parse_l3(l3_hdr, data_end, eth->h_proto, src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0) {
+        // Count even if parse fails
+        __u32 r_key = 0;
+        __u64 *r_count = bpf_map_lookup_elem(&raw_pkt_count, &r_key);
+        if (r_count) __sync_fetch_and_add(r_count, 1);
         return XDP_PASS;
+    }
+    
+    // Count successful L3 parse
+    __u32 r_key = 0;
+    __u64 *r_count = bpf_map_lookup_elem(&raw_pkt_count, &r_key);
+    if (r_count) __sync_fetch_and_add(r_count, 1);
 
     if (l4_proto == IPPROTO_GRE) {
         struct grehdr *gre = l4_hdr; if ((void *)(gre + 1) > data_end) return XDP_PASS;

@@ -48,6 +48,7 @@ struct flow_event_t {
     uint8_t tcp_flags;
     uint8_t is_tunneled;
     uint8_t sni_hostname[64];
+    uint8_t _pad[6];
     uint64_t timestamp_ns;
     uint8_t dns_payload_raw[256];
 };
@@ -161,16 +162,20 @@ struct flow_record {
 
 struct flow_record *flows = NULL; 
 static int drop_map_fd = -1;
+static int raw_pkt_map_fd = -1;
 
-void print_drops() {
-    if (drop_map_fd < 0) return;
+void print_stats() {
     uint32_t key = 0;
-    uint64_t drops = 0;
-    if (bpf_map_lookup_elem(drop_map_fd, &key, &drops) == 0) {
-        if (drops > 0) {
-            fprintf(stderr, "\n⚠️  [ALERT] XDP RingBuffer Drops: %lu packets lost because user-space was too slow.\n", drops);
-        }
+    uint64_t drops = 0, raw = 0;
+    
+    if (drop_map_fd >= 0) {
+        bpf_map_lookup_elem(drop_map_fd, &key, &drops);
     }
+    if (raw_pkt_map_fd >= 0) {
+        bpf_map_lookup_elem(raw_pkt_map_fd, &key, &raw);
+    }
+    
+    fprintf(stderr, "\n📊 [Stats] Total Packets Observed (XDP): %lu | RingBuffer Drops: %lu\n", raw, drops);
 }
 
 /**
@@ -361,7 +366,7 @@ static void sig_handler(int sig) {
     (void)sig;
     if (!exiting) {
         exiting = true;
-        print_drops();
+        print_stats();
         export_all_flows(); 
         
         for (int i = 0; i < link_count; i++) {
@@ -394,7 +399,15 @@ int main(int argc, char **argv) {
     signal(SIGTERM, sig_handler);
 
     obj = bpf_object__open_file("build/main.bpf.o", NULL);
-    if (bpf_object__load(obj)) return 1;
+    if (libbpf_get_error(obj)) {
+        fprintf(stderr, "[Fatal] Failed to open BPF object. Check if build/main.bpf.o exists.\n");
+        return 1;
+    }
+
+    if (bpf_object__load(obj)) {
+        fprintf(stderr, "[Fatal] Failed to load BPF object into kernel. Check dmesg for verifier errors.\n");
+        return 1;
+    }
 
     struct bpf_program *prog = bpf_object__find_program_by_name(obj, "xdp_prog");
     
@@ -421,15 +434,32 @@ int main(int argc, char **argv) {
     }
     
     int map_fd = bpf_object__find_map_fd_by_name(obj, "flows_ringbuf");
+    if (map_fd < 0) {
+        fprintf(stderr, "[Fatal] Failed to find flows_ringbuf map.\n");
+        goto cleanup;
+    }
+
     rb = ring_buffer__new(map_fd, handle_event, NULL, NULL);
+    if (!rb) {
+        fprintf(stderr, "[Fatal] Failed to create RingBuffer. Try decreasing RingBuffer size in main.bpf.c.\n");
+        goto cleanup;
+    }
 
     drop_map_fd = bpf_object__find_map_fd_by_name(obj, "drop_counter");
+    if (drop_map_fd < 0) {
+        fprintf(stderr, "[Warning] Could not find drop_counter map.\n");
+    }
+
+    raw_pkt_map_fd = bpf_object__find_map_fd_by_name(obj, "raw_pkt_count");
+    if (raw_pkt_map_fd < 0) {
+        fprintf(stderr, "[Warning] Could not find raw_pkt_count map.\n");
+    }
 
     fprintf(stderr, "[System] Monitoring %d interfaces. Aggregating data plane events...\n", link_count);
     int poll_count = 0;
     while (!exiting) {
         ring_buffer__poll(rb, 100); 
-        if (++poll_count % 100 == 0) print_drops(); // Periodic check
+        if (++poll_count % 100 == 0) print_stats(); // Periodic check
     }
 
 cleanup:
