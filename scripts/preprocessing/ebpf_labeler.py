@@ -29,7 +29,7 @@ INPUT_DIR = "./data/interim/EBPF_RAW"
 OUTPUT_DIR = "./data/processed/EBPF"
 # Target Attacker IPs (Support for both IPv4 and IPv6)
 # Update these based on your specific testbed topology
-ATTACKER_IPS = ["172.16.0.5", "fe80::215:5dff:fe00:5"] 
+ATTACKER_IPS = ["172.16.0.5", "2001:db8:acad:10::5", "fe80::215:5dff:fe00:5"] 
 CHUNK_SIZE = 500_000 
 
 def process_file_auto(file_path):
