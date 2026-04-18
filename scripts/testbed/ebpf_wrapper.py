@@ -1,133 +1,130 @@
 import os
-import glob
+import re
 import subprocess
-import json
 import time
-
-"""
-eBPFNetFlowLyzer Orchestrator (C-Native Benchmark Wrapper)
-Replaces NTLFlowLyzer chunking strategy with direct O(1) ingestion via tcpreplay.
-Calculates hardware-metrics synchronously with monitor.py.
-"""
+import json
+import signal
+import glob
 
 # --- CONFIGURATION ---
-INPUT_DIRS = ["/opt/eBPFNetFlowLyzer/data/raw/PCAPv6", "/opt/eBPFNetFlowLyzer/data/raw/PCAP"]
-OUTPUT_DIR = "./data/interim/EBPF_RAW"
+# Base directory for datasets (relative to project root)
+DATA_RAW = "data/raw"
+# Base directory for output
+OUTPUT_BASE = "data/interim/EBPF_RAW"
+# Path to the compiled loader
+LOADER_BIN = "./build/loader"
+# Priority order for scanning (explicitly list the categories)
+EXPERIMENT_ORDER = ["PCAPv6", "PCAP"]
 
-def get_packet_count(pcap_files):
-    import struct
-    PCAP_MAGIC_LE, PCAP_MAGIC_BE = b'\xd4\xc3\xb2\xa1', b'\xa1\xb2\xc3\xd4'
-    total = 0
-    for pcap in pcap_files:
-        try:
-            with open(pcap, 'rb') as f:
-                magic = f.read(4)
-                if magic not in (PCAP_MAGIC_LE, PCAP_MAGIC_BE): continue
-                little_endian = (magic == PCAP_MAGIC_LE)
-                f.read(20)
-                count = 0
-                while True:
-                    hdr = f.read(16)
-                    if len(hdr) < 16: break
-                    endian = '<' if little_endian else '>'
-                    incl_len = struct.unpack(endian + 'I', hdr[8:12])[0]
-                    f.seek(incl_len, 1)
-                    count += 1
-                total += count
-        except Exception: pass
-    return total
+def get_tcpreplay_stats(output):
+    """Extracts the real packet count from tcpreplay output."""
+    match = re.search(r"Actual: (\d+) packets", output)
+    if match:
+        return int(match.group(1))
+    return 0
 
-def run_cmd(cmd):
-    subprocess.run(cmd, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-
-def process_attack(input_pcap_dir, output_csv_dir, attack_name):
-    final_csv = os.path.join(output_csv_dir, f"{attack_name}.csv")
-    work_dir = os.path.join(output_csv_dir, f"temp_{attack_name}")
+def process_pcap_dir(pcap_dir, category_tag):
+    """Runs the eBPF extraction for all PCAP/PCAPNG files in a directory."""
+    # Clean up the name for the experiment
+    rel_path = os.path.relpath(pcap_dir, os.path.join(DATA_RAW, category_tag))
+    if rel_path == ".":
+        experiment_name = category_tag
+    else:
+        experiment_name = f"{category_tag}_{rel_path.replace(os.path.sep, '_')}"
     
-    print(f"\n🚀 STARTING eBPF EXTRACTION: {attack_name}...")
-    os.makedirs(work_dir, exist_ok=True)
-    os.makedirs(output_csv_dir, exist_ok=True)
-
-    # Support both pcap and pcapng for Dual-Stack experiments
-    pcaps = glob.glob(os.path.join(input_pcap_dir, "*.pcap")) + glob.glob(os.path.join(input_pcap_dir, "*.pcapng"))
-    if not pcaps: return
+    output_dir = os.path.join(OUTPUT_BASE, category_tag, rel_path if rel_path != "." else "")
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Precise packet count estimation (Skip complex pcapng parsing for speed, use approx if needed or tcpreplay count)
-    total_packets = get_packet_count([p for p in pcaps if p.endswith('.pcap')])
-    if not total_packets: total_packets = 0 # Fallback for pcapng type safety
-
-    # 2. Invoke eBPF Loader on loopback and hook the Monitor
-    loader_cmd = ["sudo", "./build/loader", "lo"]
-    with open(final_csv, 'w') as csv_out:
-        loader_proc = subprocess.Popen(loader_cmd, stdout=csv_out, stderr=subprocess.DEVNULL)
+    csv_output = os.path.join(output_dir, f"extraction_{category_tag}.csv")
+    metrics_csv = os.path.join(output_dir, "resource_metrics.csv")
     
-    # Let XDP attach properly
-    time.sleep(1)
+    print(f"\n🚀 STARTING eBPF EXTRACTION: {experiment_name}")
+    
+    pcaps = glob.glob(os.path.join(pcap_dir, "*.pcap")) + glob.glob(os.path.join(pcap_dir, "*.pcapng"))
+    if not pcaps:
+        print(f"   ⚠️  No pcap files found in {pcap_dir}")
+        return
 
-    monitor_csv = os.path.join(output_csv_dir, f"monitor_{attack_name}.csv")
-    monitor_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "monitor.py")
-    import sys
-    monitor_proc = subprocess.Popen([sys.executable, monitor_script, str(loader_proc.pid), monitor_csv])
-
-    # 3. Stream data via Hardware (tcpreplay sequentially sends raw to Interface loopback)
-    print(f"   Streaming {total_packets if total_packets > 0 else 'N/A'} packets sequentially via tcpreplay directly to BPF Map (Top-Speed)...")
+    # 1. Start the eBPF Loader
+    with open(csv_output, 'w') as f:
+        proc_loader = subprocess.Popen(["sudo", LOADER_BIN, "lo"], stdout=f, stderr=subprocess.DEVNULL)
+    
+    time.sleep(2)
+    
+    # 2. Start the Resource Monitor
+    monitor_script = "scripts/testbed/monitor.py"
+    proc_mon = None
+    if os.path.exists(monitor_script):
+        proc_mon = subprocess.Popen(["python3", monitor_script, str(proc_loader.pid), metrics_csv])
+    
+    # 3. Inject Traffic
+    total_packets = 0
     start_time = time.time()
     
     for p in pcaps:
+        print(f"   Streaming: {os.path.basename(p)}")
+        # Remove 2>/dev/null to allow capturing the output
+        cmd = f"sudo tcpdump -r {p} -w - 2>/dev/null | sudo tcpreplay -i lo -t -"
         try:
-            # Universal stream: tcpdump reads any format (pcap/pcapng) and pipes raw to tcpreplay
-            stream_cmd = f"sudo tcpdump -r {p} -w - 2>/dev/null | sudo tcpreplay -i lo -t - 2>/dev/null"
-            subprocess.run(stream_cmd, shell=True, check=True)
-        except subprocess.CalledProcessError:
-            print(f"   ⚠️  Failed to stream {os.path.basename(p)}")
-            pass
+            # Capture stderr because tcpreplay writes stats there
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
+            packets = get_tcpreplay_stats(res.stderr)
+            total_packets += packets
+            print(f"   -> {packets} packets injected.")
+        except subprocess.CalledProcessError as e:
+            print(f"   ❌ ERROR during injection of {p}: {e.stderr}")
 
-    end_time = time.time()
-    elapsed = end_time - start_time
+    elapsed = time.time() - start_time
+    pps = (total_packets / elapsed) if elapsed > 0 else 0
+
+    # 4. Graceful Shutdown
+    if proc_mon:
+        os.kill(proc_mon.pid, signal.SIGTERM)
+        proc_mon.wait()
     
-    # Estimate packets for PPS calculation if tcpreplay log is unavailable
-    if not total_packets:
-        print("   📉 PCAPNG detected: Estimating metrics based on wall-clock execution.")
-        total_packets = 0 # Will show as 0 in summary but extraction happened
-
-    pps = (total_packets / elapsed) if (elapsed > 0 and total_packets > 0) else 0
-
-    # 4. Clean shutdown
-    monitor_proc.terminate()
-    try: monitor_proc.wait(timeout=2)
-    except: monitor_proc.kill()
+    # Send SIGINT to loader to trigger map dump
+    subprocess.run(["sudo", "kill", "-INT", str(proc_loader.pid)], check=False)
+    proc_loader.wait()
     
-    # We must kill the daemon specifically via sudo since we started it as root
-    subprocess.run(["sudo", "kill", "-INT", str(loader_proc.pid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        loader_proc.wait(timeout=60) # CRITICAL: Gives C-Daemon time to dump Hash Maps to CSV.
-    except Exception:
-        pass
-    
-    benchmark_log = os.path.join(output_csv_dir, f"benchmark_{attack_name}.json")
-    with open(benchmark_log, 'w') as f:
-        json.dump({
-            "attack": attack_name, "tool": "eBPFNetFlowLyzer_C",
-            "total_packets": total_packets, "time_seconds": elapsed, 
-            "pps": pps, "monitor_file": monitor_csv
-        }, f, indent=4)
-
+    # Save metadata
+    summary = {
+        "experiment": experiment_name,
+        "packets_sent": total_packets,
+        "time_seconds": elapsed,
+        "pps": pps,
+        "timestamp": time.ctime()
+    }
+    with open(os.path.join(output_dir, "summary.json"), 'w') as f:
+        json.dump(summary, f, indent=4)
+        
     print(f"✅ DONE: {total_packets} packets | {elapsed:.2f}s | {pps:.2f} pps")
 
-def run_extraction():
-    print(f"=== eBPFNetFlowLyzer Pipeline (Dual-Stack Edition) ===")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def main():
+    print("=== eBPFNetFlowLyzer Research Pipeline ===")
     
-    for root_dir in INPUT_DIRS:
-        if not os.path.exists(root_dir): continue
-        print(f"📂 Scanning Dataset: {root_dir}")
-        pcap_dirs = set(os.path.dirname(p) for p in glob.glob(os.path.join(root_dir, "**", "*.pcap*"), recursive=True))
-        for pcap_dir in sorted(pcap_dirs):
-            rel_path = os.path.relpath(pcap_dir, root_dir)
-            tag = os.path.basename(root_dir)
-            process_attack(pcap_dir, os.path.join(OUTPUT_DIR, f"{tag}_{rel_path}"), f"{tag}_{rel_path}".replace(os.path.sep, "_"))
-            import sys
-            sys.stdout.flush()
+    if not os.path.exists(LOADER_BIN):
+        print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
+        return
+
+    for category in EXPERIMENT_ORDER:
+        category_path = os.path.join(DATA_RAW, category)
+        if not os.path.exists(category_path):
+            continue
+            
+        print(f"\n📂 Scanning Category: {category}")
+        
+        # Find all subdirectories containing pcaps, or the category root itself
+        pcap_files = glob.glob(os.path.join(category_path, "**", "*.pcap*"), recursive=True)
+        pcap_dirs = sorted(list(set(os.path.dirname(p) for p in pcap_files)))
+        
+        if not pcap_dirs and (glob.glob(os.path.join(category_path, "*.pcap*"))):
+             pcap_dirs = [category_path]
+
+        for pcap_dir in pcap_dirs:
+            process_pcap_dir(pcap_dir, category)
 
 if __name__ == "__main__":
-    run_extraction()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted. Cleaning up...")
