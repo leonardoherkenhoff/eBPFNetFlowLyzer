@@ -41,4 +41,4 @@ sudo ./build/loader <interface_name> > flow_results.csv
 Distributed under the **GNU General Public License v2.0**. See `LICENSE` for more information.
 
 ---
-*Developed for research and high-performance network security monitoring.*
+*Developed as part of the Master's Degree in Applied Computing research, focused on Network Security for the Detection and Mitigation of DDoS attacks.*
