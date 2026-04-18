@@ -104,16 +104,13 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
         
-        // Deep Traversal of IPv6 Extension Headers (Verifier-Safe Loop)
-        #pragma unroll
-        for (int i = 0; i < 4; i++) {
-            if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44) {
-                struct { __u8 next; __u8 len; } *ext = next;
-                if ((void *)(ext + 1) > data_end) break;
+        // Verifier-Safe IPv6 Extension Skip (Single pass, constant offset)
+        if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44) {
+            struct { __u8 next; __u8 len; } *ext = next;
+            if ((void *)(ext + 1) <= data_end) {
                 *l4_proto = ext->next;
-                next += 8; // Safely skip base extension header (8 bytes)
-                // In reality, len specifies the length, but 8 is common for HbH/Dest
-            } else break;
+                next += 8; 
+            }
         }
         *l4_hdr = next;
         return 0;
@@ -247,14 +244,10 @@ int xdp_prog(struct xdp_md *ctx) {
     } else if (l4_proto == IPPROTO_ICMP || l4_proto == IPPROTO_ICMPV6) {
         struct icmphdr_t { __u8 t; __u8 c; __u16 chk; } *ic = l4_hdr;
         if ((void *)(ic + 1) > data_end) return XDP_PASS;
-        
-        // Granular ICMP Extraction: Use Type/Code AND Identifier (if present) to separate flows
         sport = ic->t; dport = ic->c; 
         if (ic->t == 8 || ic->t == 0 || ic->t == 128 || ic->t == 129) {
              struct icmp_echo_t { __u8 t; __u8 c; __u16 chk; __u16 id; __u16 seq; } *echo = l4_hdr;
-             if ((void *)(echo + 1) <= data_end) {
-                 sport = bpf_ntohs(echo->id); // Use ID as source "port" for granularity
-             }
+             if ((void *)(echo + 1) <= data_end) sport = bpf_ntohs(echo->id); 
         }
         head_len = 8;
         if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4) - head_len;
@@ -279,7 +272,7 @@ int xdp_prog(struct xdp_md *ctx) {
 
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
     if (!ev) {
-        __u32 k = 0; __u64 *c = bpf_map_lookup_elem(&drop_counter, &k);
+        __u32 k0 = 0; __u64 *c = bpf_map_lookup_elem(&drop_counter, &k0);
         if (c) __sync_fetch_and_add(c, 1);
         return XDP_PASS;
     }
@@ -290,8 +283,8 @@ int xdp_prog(struct xdp_md *ctx) {
     ev->ttl = ttl; ev->window_size = win;
     __builtin_memcpy(ev->sni_hostname, sni, 64);
     if (l4_proto == 17 && (bpf_ntohs(sport) == 53 || bpf_ntohs(dport) == 53)) {
-        void *dns_p = payload ? payload : (void *)l4_hdr + head_len;
-        if (dns_p + 256 <= data_end) __builtin_memcpy(ev->dns_payload_raw, dns_p, 256);
+        void *dns_p = (void *)l4_hdr + 8;
+        if (dns_p + 256 <= data_end) bpf_probe_read_kernel(ev->dns_payload_raw, 256, dns_p);
     }
     bpf_ringbuf_submit(ev, 0);
     return XDP_PASS;
