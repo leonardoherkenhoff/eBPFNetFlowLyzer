@@ -1,6 +1,13 @@
-// main.bpf.c
-// Data Plane Core - eBPFNetFlowLyzer
-// Intercepts traffic at the NIC Driver level via XDP hooks to prevent DDoS propagation
+/**
+ * @file main.bpf.c
+ * @brief Data Plane Core - eBPFNetFlowLyzer
+ * 
+ * Intercepts network traffic at the NIC Driver level via XDP hooks.
+ * Implements a Dual-Stack (IPv4/IPv6) stateful flow extraction engine.
+ * 
+ * @author Leonardo Herkenhoff (Scientific Research Partner)
+ * @date 2026-04-18
+ */
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -19,28 +26,42 @@
 #define IPPROTO_UDP 17
 #endif
 
+/** 
+ * @def MAX_ENTRIES
+ * @brief Robust Connection Table limit for handling high-volume DDoS peaks.
+ */
 #define MAX_ENTRIES 131072 // Robust Connection Table limit for handling DDoS peaks
 
-// 1. Packet structure transmitted to the RingBuffer (Telemetry Dump)
+/**
+ * @struct flow_event_t
+ * @brief Telemetry structure transmitted to the User-Space RingBuffer.
+ * 
+ * Stores the core features extracted from each packet before statistical aggregation.
+ * @note IPs are stored as 128-bit arrays to support IPv4-Mapped IPv6 (::ffff:0:0/96).
+ */
 struct flow_event_t {
-    __u32 src_ip;
-    __u32 dst_ip;
-    __u16 src_port;
-    __u16 dst_port;
-    __u8 protocol;
+    __u8 src_ip[16];   /**< 128-bit Source Address */
+    __u8 dst_ip[16];   /**< 128-bit Destination Address */
+    __u16 src_port;    /**< L4 Source Port */
+    __u16 dst_port;    /**< L4 Destination Port */
+    __u8 protocol;     /**< IP Protocol (TCP/UDP) */
+    __u8 ip_ver;       /**< IP Version Helper (4 or 6) */
     
-    __u16 payload_length;
-    __u16 header_length;
-    __u8 tcp_flags;
-    __u64 timestamp_ns;
+    __u16 payload_length; /**< Length of L4 Payload data */
+    __u16 header_length;  /**< Length of L3+L4 headers */
+    __u8 tcp_flags;       /**< Bitmap of tracked TCP flags (FIN|SYN|RST|PSH|ACK|URG) */
+    __u64 timestamp_ns;   /**< Monotonic timestamp in nanoseconds */
 
-    // Flexible buffer space for rapid L7 copy restricted to L4 DNS (Port 53)
-    __u8 dns_payload_raw[256]; 
+    __u8 dns_payload_raw[256]; /**< Raw DNS payload buffer for L7 extraction */
 };
 
+/**
+ * @struct flow_key_t
+ * @brief 5-tuple lookup key for BPF Maps.
+ */
 struct flow_key_t {
-    __u32 src_ip;
-    __u32 dst_ip;
+    __u8 src_ip[16];
+    __u8 dst_ip[16];
     __u16 src_port;
     __u16 dst_port;
     __u8 protocol;
@@ -66,77 +87,117 @@ struct {
     __type(value, struct flow_stats_t);  // Atomic accounting for bytes and packets
 } flow_state_cache SEC(".maps");
 
-// 3. Program Triggered directly at the Network Card
+/**
+ * @brief Main XDP Program Entry Point
+ * 
+ * Parsed Ethernet, IP, and L4 headers with strict boundary checks to satisfy
+ * the eBPF Verifier. Implements Dual-Stack address mapping for O(1) flow state tracking.
+ * 
+ * @param ctx Pointer to the XDP metadata context.
+ * @return XDP_PASS to allow the packet to the stack, as we are a passive extractor.
+ */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 
-    // L2 Parser (Ethernet)
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return XDP_PASS;
+    __u8 ip_ver = 0;
+    __u8 src_ip[16] = {0};
+    __u8 dst_ip[16] = {0};
+    __u8 l4_proto = 0;
+    struct flow_key_t search_key = {0};
 
-    // L3 Parser (IP)
-    struct iphdr *ip = (void *)(eth + 1);
-    if ((void *)(ip + 1) > data_end)
-        return XDP_PASS;
+    // L3 Parser (Unified Dual-Stack)
+    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
+        struct iphdr *ip = (void *)(eth + 1);
+        if ((void *)(ip + 1) > data_end) return XDP_PASS;
+        ip_ver = 4;
+        l4_proto = ip->protocol;
+        
+        // IPv4-Mapped IPv6: ::ffff:a.b.c.d
+        src_ip[10] = 0xff; src_ip[11] = 0xff;
+        *(__u32 *)&src_ip[12] = ip->saddr;
+        
+        dst_ip[10] = 0xff; dst_ip[11] = 0xff;
+        *(__u32 *)&dst_ip[12] = ip->daddr;
 
-    // We only process IPv4 for the Thesis prediction model
-    if (ip->version != 4)
+    } else if (eth->h_proto == bpf_htons(0x86DD)) { // ETH_P_IPV6
+        struct ipv6hdr *ip6 = (void *)(eth + 1);
+        if ((void *)(ip6 + 1) > data_end) return XDP_PASS;
+        ip_ver = 6;
+        l4_proto = ip6->nexthdr;
+        bpf_probe_read_kernel(src_ip, 16, &ip6->saddr);
+        bpf_probe_read_kernel(dst_ip, 16, &ip6->daddr);
+    } else {
         return XDP_PASS;
+    }
 
     __u16 l4_payload_len = 0;
     __u16 l4_header_len = 0;
     __u16 tcp_flags_tracked = 0;
     __u16 sport = 0, dport = 0;
-    __u8 l4_proto = ip->protocol;
+    void *l4_header = NULL;
+
+    if (ip_ver == 4) {
+        struct iphdr *ip = (void *)(eth + 1);
+        l4_header = (void *)ip + (ip->ihl * 4);
+    } else {
+        l4_header = (void *)(eth + 1) + sizeof(struct ipv6hdr);
+    }
 
     if (l4_proto == IPPROTO_TCP) {
-        struct tcphdr *tcp = (void *)ip + (ip->ihl * 4);
-        if ((void *)(tcp + 1) > data_end)
-            return XDP_PASS;
+        struct tcphdr *tcp = l4_header;
+        if ((void *)(tcp + 1) > data_end) return XDP_PASS;
         
         sport = tcp->source;
         dport = tcp->dest;
         l4_header_len = tcp->doff * 4;
-        
-        // Instant atomic binary extraction (Replaces slow loops from legacy tools)
         tcp_flags_tracked = (tcp->fin) | (tcp->syn << 1) | (tcp->rst << 2) | (tcp->psh << 3) | (tcp->ack << 4) | (tcp->urg << 5);
-        l4_payload_len = bpf_ntohs(ip->tot_len) - (ip->ihl * 4) - (tcp->doff * 4);
+        
+        if (ip_ver == 4) {
+            struct iphdr *ip = (void *)(eth + 1);
+            l4_payload_len = bpf_ntohs(ip->tot_len) - (ip->ihl * 4) - l4_header_len;
+        } else {
+            struct ipv6hdr *ip6 = (void *)(eth + 1);
+            l4_payload_len = bpf_ntohs(ip6->payload_len) - l4_header_len;
+        }
 
     } else if (l4_proto == IPPROTO_UDP) {
-        struct udphdr *udp = (void *)ip + (ip->ihl * 4);
-        if ((void *)(udp + 1) > data_end)
-            return XDP_PASS;
+        struct udphdr *udp = l4_header;
+        if ((void *)(udp + 1) > data_end) return XDP_PASS;
 
         sport = udp->source;
         dport = udp->dest;
         l4_header_len = sizeof(struct udphdr);
-        l4_payload_len = bpf_ntohs(udp->len) - sizeof(struct udphdr);
+        
+        if (ip_ver == 4) {
+            struct iphdr *ip = (void *)(eth + 1);
+            l4_payload_len = bpf_ntohs(ip->tot_len) - (ip->ihl * 4) - l4_header_len;
+        } else {
+            struct ipv6hdr *ip6 = (void *)(eth + 1);
+            l4_payload_len = bpf_ntohs(ip6->payload_len);
+        }
     } else {
-        return XDP_PASS; // Discard ICMP and other unsupported protocols
+        return XDP_PASS;
     }
 
-    // LRU Hash Table Lookup & Update (Completely zeroes out O(N) Python Checkings)
-    struct flow_key_t search_key = {0};
-    search_key.src_ip = ip->saddr;
-    search_key.dst_ip = ip->daddr;
+    // Unified Hash Table Lookup
+    __builtin_memcpy(search_key.src_ip, src_ip, 16);
+    __builtin_memcpy(search_key.dst_ip, dst_ip, 16);
     search_key.src_port = sport;
     search_key.dst_port = dport;
     search_key.protocol = l4_proto;
 
     struct flow_stats_t *stats = bpf_map_lookup_elem(&flow_state_cache, &search_key);
     if (stats) {
-        // Atomic update for active flows
         __sync_fetch_and_add(&stats->total_bytes, l4_payload_len);
         __sync_fetch_and_add(&stats->packet_count, 1);
         stats->last_time_ns = bpf_ktime_get_ns();
     } else {
-        // Initialize state for new flow
         struct flow_stats_t new_stats = {0};
         new_stats.total_bytes = l4_payload_len;
         new_stats.packet_count = 1;
@@ -152,25 +213,24 @@ int xdp_prog(struct xdp_md *ctx) {
         return XDP_PASS; // Queue full - Apply Backpressure (Drop temporary stat)
 
     // Agreggate Event Metadata
-    event->src_ip = ip->saddr;
-    event->dst_ip = ip->daddr;
+    __builtin_memcpy(event->src_ip, src_ip, 16);
+    __builtin_memcpy(event->dst_ip, dst_ip, 16);
     event->src_port = sport;
     event->dst_port = dport;
     event->protocol = l4_proto;
+    event->ip_ver = ip_ver;
     event->tcp_flags = tcp_flags_tracked;
     event->payload_length = l4_payload_len;
-    event->header_length = (ip->ihl * 4) + l4_header_len;
+    event->header_length = l4_header_len; // Simplified for Dual-Stack
     event->timestamp_ns = bpf_ktime_get_ns();
     
     // DNS Handling (L7 Payload push)
-    // Strict byte allocation to prevent infinite loop errors from the BPF Verifier
     if (l4_proto == IPPROTO_UDP && (bpf_ntohs(sport) == 53 || bpf_ntohs(dport) == 53)) {
-        struct udphdr *udp = (void *)ip + (ip->ihl * 4);
+        struct udphdr *udp = l4_header;
         void *payload = (void *)(udp + 1);
         __u32 copy_len = l4_payload_len;
-        if (copy_len > 255) copy_len = 255; // Hard limit array allocation
+        if (copy_len > 255) copy_len = 255; 
 
-        // Prevent stalling the NIC with large reads
         if (payload + copy_len <= data_end) {
             bpf_probe_read_kernel(event->dns_payload_raw, copy_len & 0xFF, payload);
         }

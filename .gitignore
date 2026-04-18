@@ -1,0 +1,35 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Go workspace file
+go.work
+go.work.sum
+
+# C / eBPF objects
+*.o
+*.ll
+
+# Vscode
+.vscode/
+
+# Build dirs
+build/
+bin/
+
+# Dataset logs
+*.csv
+dataset/
+
+# Repositorios Originais Python (Isolamento)
+extratores_originais/
+
+# Assets temporários / Agentes Locais
+skills/
+data/

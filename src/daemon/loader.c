@@ -1,6 +1,13 @@
-// loader.c
-// User-Space Control Plane Daemon (Pure C Architecture V2)
-// Unificacao Estrita NTLFlowLyzer + ALFlowLyzer
+/**
+ * @file loader.c
+ * @brief User-Space Control Plane Daemon - eBPFNetFlowLyzer
+ * 
+ * Manages the eBPF RingBuffer, performs O(1) statistical aggregation using 
+ * Welford's Algorithm, and exports the final bidirectional feature matrix.
+ * 
+ * @author Leonardo Herkenhoff
+ * @date 2026-04-18
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,11 +23,12 @@
 
 // Synchronized precisely with main.bpf.c RingBuffer Event
 struct flow_event_t {
-    uint32_t src_ip;
-    uint32_t dst_ip;
+    uint8_t src_ip[16];
+    uint8_t dst_ip[16];
     uint16_t src_port;
     uint16_t dst_port;
     uint8_t protocol;
+    uint8_t ip_ver;
     uint16_t payload_length;
     uint16_t header_length;
     uint8_t tcp_flags;
@@ -31,12 +39,19 @@ struct flow_event_t {
 static volatile bool exiting = false;
 
 // O(1) Mathematical Core for Continuous Flow Stream (Replaces Python Arrays)
+/**
+ * @struct welford_stat
+ * @brief Container for iterative statistical calculation (O(1) Memory).
+ * 
+ * Replaces the need for storing large packet arrays in memory to calculate 
+ * Variance and Standard Deviation, critical for real-time eBPF monitoring.
+ */
 struct welford_stat {
-    unsigned long count;
-    double mean;
-    double M2;
-    double min;
-    double max;
+    unsigned long count; /**< Number of observations */
+    double mean;         /**< Rolling expected value */
+    double M2;           /**< Sum of squares of differences from the mean */
+    double min;          /**< Minimum observed value */
+    double max;          /**< Maximum observed value */
 };
 
 void welford_init(struct welford_stat *w) {
@@ -47,6 +62,11 @@ void welford_init(struct welford_stat *w) {
     w->max = 0.0;
 }
 
+/**
+ * @brief Updates a Welford Stat structure with a new value.
+ * @param w Pointer to the stat container.
+ * @param value The new sample (e.g., packet length or IAT).
+ */
 void welford_update(struct welford_stat *w, double value) {
     w->count++;
     double delta = value - w->mean;
@@ -69,8 +89,8 @@ double welford_std(struct welford_stat *w) {
 
 // User-Space Hash Table Flow State structure (uthash)
 struct flow_key {
-    uint32_t src_ip;
-    uint32_t dst_ip;
+    uint8_t src_ip[16];
+    uint8_t dst_ip[16];
     uint16_t src_port;
     uint16_t dst_port;
     uint8_t protocol;
@@ -139,21 +159,20 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     struct flow_record *f;
     struct flow_key k;
     
-    k.src_ip = e->src_ip;
-    k.dst_ip = e->dst_ip;
+    memcpy(k.src_ip, e->src_ip, 16);
+    memcpy(k.dst_ip, e->dst_ip, 16);
     k.src_port = e->src_port;
     k.dst_port = e->dst_port;
     k.protocol = e->protocol;
 
     HASH_FIND(hh, flows, &k, sizeof(struct flow_key), f);
     
-    uint8_t is_fwd = 1; // True heuristic based on initialization
+    uint8_t is_fwd = 1;
 
     if (!f) {
-        // Reverse lookup to detect Backward packets
         struct flow_key reverse_k;
-        reverse_k.src_ip = e->dst_ip;
-        reverse_k.dst_ip = e->src_ip;
+        memcpy(reverse_k.src_ip, e->dst_ip, 16);
+        memcpy(reverse_k.dst_ip, e->src_ip, 16);
         reverse_k.src_port = e->dst_port;
         reverse_k.dst_port = e->src_port;
         reverse_k.protocol = e->protocol;
@@ -243,9 +262,19 @@ void export_all_flows() {
 
     HASH_ITER(hh, flows, f, tmp) {
         double duration_us = (double)(f->last_time - f->start_time) / 1000.0;
+        char src_str[INET6_ADDRSTRLEN], dst_str[INET6_ADDRSTRLEN];
         
-        printf("%u,%u,%u,%u,%u,%lu,%.2f,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f\n",
-            f->key.src_ip, f->key.dst_ip,
+        // Elegant address conversion for CSV Ground Truth
+        if (memcmp(f->key.src_ip, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff", 12) == 0) {
+            inet_ntop(AF_INET, &f->key.src_ip[12], src_str, INET_ADDRSTRLEN);
+            inet_ntop(AF_INET, &f->key.dst_ip[12], dst_str, INET_ADDRSTRLEN);
+        } else {
+            inet_ntop(AF_INET6, f->key.src_ip, src_str, INET6_ADDRSTRLEN);
+            inet_ntop(AF_INET6, f->key.dst_ip, dst_str, INET6_ADDRSTRLEN);
+        }
+
+        printf("%s,%s,%u,%u,%u,%lu,%.2f,%lu,%lu,%lu,%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,%u,%u,%u,%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.2f,%.2f\n",
+            src_str, dst_str,
             ntohs(f->key.src_port), ntohs(f->key.dst_port), f->key.protocol,
             f->start_time, duration_us,
             f->fwd_pkt_count, f->bwd_pkt_count,

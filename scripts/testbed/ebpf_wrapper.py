@@ -11,7 +11,7 @@ Calculates hardware-metrics synchronously with monitor.py.
 """
 
 # --- CONFIGURATION ---
-INPUT_DIR = "/opt/eBPFNetFlowLyzer/data/raw/PCAP"
+INPUT_DIRS = ["/opt/eBPFNetFlowLyzer/data/raw/PCAP", "/opt/eBPFNetFlowLyzer/data/raw/PCAPv6"]
 OUTPUT_DIR = "./data/interim/EBPF_RAW"
 
 def get_packet_count(pcap_files):
@@ -48,9 +48,13 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
     os.makedirs(work_dir, exist_ok=True)
     os.makedirs(output_csv_dir, exist_ok=True)
 
-    pcaps = glob.glob(os.path.join(input_pcap_dir, "*.pcap"))
+    # Support both pcap and pcapng for Dual-Stack experiments
+    pcaps = glob.glob(os.path.join(input_pcap_dir, "*.pcap")) + glob.glob(os.path.join(input_pcap_dir, "*.pcapng"))
     if not pcaps: return
-    total_packets = get_packet_count(pcaps)
+    
+    # Precise packet count estimation (Skip complex pcapng parsing for speed, use approx if needed or tcpreplay count)
+    total_packets = get_packet_count([p for p in pcaps if p.endswith('.pcap')])
+    if not total_packets: total_packets = "N/A" # For pcapng cases without raw count logic
 
     # 2. Invoke eBPF Loader on loopback and hook the Monitor
     loader_cmd = ["sudo", "./build/loader", "lo"]
@@ -102,12 +106,19 @@ def process_attack(input_pcap_dir, output_csv_dir, attack_name):
     print(f"✅ DONE: {total_packets} packets | {elapsed:.2f}s | {pps:.2f} pps")
 
 def run_extraction():
-    print(f"=== eBPFNetFlowLyzer Pipeline ===")
+    print(f"=== eBPFNetFlowLyzer Pipeline (Dual-Stack Edition) ===")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    pcap_dirs = set(os.path.dirname(p) for p in glob.glob(os.path.join(INPUT_DIR, "**", "*.pcap"), recursive=True))
-    for pcap_dir in sorted(pcap_dirs):
-        rel_path = os.path.relpath(pcap_dir, INPUT_DIR)
-        process_attack(pcap_dir, os.path.join(OUTPUT_DIR, rel_path), rel_path.replace(os.path.sep, "_"))
+    
+    for root_dir in INPUT_DIRS:
+        if not os.path.exists(root_dir): continue
+        print(f"📂 Scanning Dataset: {root_dir}")
+        pcap_dirs = set(os.path.dirname(p) for p in glob.glob(os.path.join(root_dir, "**", "*.pcap*"), recursive=True))
+        for pcap_dir in sorted(pcap_dirs):
+            rel_path = os.path.relpath(pcap_dir, root_dir)
+            tag = os.path.basename(root_dir)
+            process_attack(pcap_dir, os.path.join(OUTPUT_DIR, f"{tag}_{rel_path}"), f"{tag}_{rel_path}".replace(os.path.sep, "_"))
+            import sys
+            sys.stdout.flush()
 
 if __name__ == "__main__":
     run_extraction()
