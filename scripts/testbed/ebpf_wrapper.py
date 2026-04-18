@@ -72,8 +72,9 @@ def process_pcap_dir(pcap_dir, category_tag):
         return
 
     # 1. Start eBPF Loader
-    with open(csv_output, 'w') as f:
-        proc_loader = subprocess.Popen(["sudo", LOADER_BIN, "lo"], stdout=f, stderr=subprocess.DEVNULL)
+    loader_log = os.path.join(output_dir, "loader_stderr.log")
+    with open(csv_output, 'w') as f, open(loader_log, 'w') as err:
+        proc_loader = subprocess.Popen(["sudo", LOADER_BIN, "lo"], stdout=f, stderr=err)
     
     time.sleep(2)
     

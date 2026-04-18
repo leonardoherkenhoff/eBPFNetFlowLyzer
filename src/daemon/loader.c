@@ -24,6 +24,7 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <unistd.h>
+#include <sys/resource.h>
 #include <signal.h>
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -372,6 +373,15 @@ static void sig_handler(int sig) {
 }
 
 int main(int argc, char **argv) {
+    // Increase memlock limit for BPF maps
+    struct rlimit rlim = {
+        .rlim_cur = RLIM_INFINITY,
+        .rlim_max = RLIM_INFINITY,
+    };
+    if (setrlimit(RLIMIT_MEMLOCK, &rlim)) {
+        fprintf(stderr, "[Error] Failed to increase RLIMIT_MEMLOCK\n");
+    }
+
     if (argc < 2) {
         fprintf(stderr, "Usage: %s <iface1> [iface2] ... [ifaceN]\n", argv[0]);
         return 1;
