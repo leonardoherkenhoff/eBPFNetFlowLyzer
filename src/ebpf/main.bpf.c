@@ -20,7 +20,7 @@
 #define IPPROTO_ICMPV6 58
 #define IPPROTO_GRE 47
 #define VXLAN_PORT 4789
-#define MAX_ENTRIES 131072 
+#define MAX_ENTRIES 524288 
 
 struct flow_event_t {
     __u8 src_ip[16];
@@ -37,6 +37,13 @@ struct flow_event_t {
     __u64 timestamp_ns;   
     __u8 dns_payload_raw[256]; 
 };
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} drop_counter SEC(".maps");
 
 struct flow_key_t {
     __u8 src_ip[16];
@@ -58,7 +65,7 @@ struct vxlanhdr { __u32 flags; __u32 vni; } __attribute__((packed));
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 256 * 1024); 
+    __uint(max_entries, 128 * 1024 * 1024); 
 } flows_ringbuf SEC(".maps");
 
 struct {
@@ -227,7 +234,12 @@ int xdp_prog(struct xdp_md *ctx) {
     }
 
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
-    if (!ev) return XDP_PASS;
+    if (!ev) {
+        __u32 key = 0;
+        __u64 *count = bpf_map_lookup_elem(&drop_counter, &key);
+        if (count) __sync_fetch_and_add(count, 1);
+        return XDP_PASS;
+    }
     __builtin_memcpy(ev->src_ip, src_ip, 16); __builtin_memcpy(ev->dst_ip, dst_ip, 16);
     ev->src_port = sport; ev->dst_port = dport; ev->protocol = l4_proto; ev->ip_ver = ip_ver;
     ev->payload_length = l4_payload_len; ev->header_length = l4_header_len;

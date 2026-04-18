@@ -1,4 +1,4 @@
-# 🛡️ eBPFNetFlowLyzer
+# 🛡️ eBPFNetFlowLyzer v1.1.0
 
 **Unified, High-Performance, Stateful Network Feature Extractor Powered by C-eBPF/XDP.**
 

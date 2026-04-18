@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-04-18
+### Added
+- **Diagnostic**: Kernel-side `drop_counter` to track RingBuffer overflows.
+- **Diagnostic**: Real-time "RingBuffer Drops" alerts in the User-Space loader.
+- **L7 Visibility**: Non-intrusive HTTPS SNI extraction.
+- **Protocol**: GRE and VXLAN decapsulation support.
+- **Architecture**: Multi-interface ingestion support (Unified aggregation).
+
+### Optimized
+- **Performance**: Increased RingBuffer size from 256KB to 128MB (500x increase).
+- **Performance**: Increased Kernel LRU Cache from 128k to 512k entries.
+
 ## [1.0.0] - 2026-04-18
 ### Added
 - **Core**: High-performance C-eBPF/XDP Data Plane.

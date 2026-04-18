@@ -159,6 +159,18 @@ struct flow_record {
 };
 
 struct flow_record *flows = NULL; 
+static int drop_map_fd = -1;
+
+void print_drops() {
+    if (drop_map_fd < 0) return;
+    uint32_t key = 0;
+    uint64_t drops = 0;
+    if (bpf_map_lookup_elem(drop_map_fd, &key, &drops) == 0) {
+        if (drops > 0) {
+            fprintf(stderr, "\n⚠️  [ALERT] XDP RingBuffer Drops: %lu packets lost because user-space was too slow.\n", drops);
+        }
+    }
+}
 
 /**
  * @brief Simplified DNS metadata parser.
@@ -348,6 +360,7 @@ static void sig_handler(int sig) {
     (void)sig;
     if (!exiting) {
         exiting = true;
+        print_drops();
         export_all_flows(); 
         
         for (int i = 0; i < link_count; i++) {
@@ -400,9 +413,13 @@ int main(int argc, char **argv) {
     int map_fd = bpf_object__find_map_fd_by_name(obj, "flows_ringbuf");
     rb = ring_buffer__new(map_fd, handle_event, NULL, NULL);
 
+    drop_map_fd = bpf_object__find_map_fd_by_name(obj, "drop_counter");
+
     fprintf(stderr, "[System] Monitoring %d interfaces. Aggregating data plane events...\n", link_count);
+    int poll_count = 0;
     while (!exiting) {
         ring_buffer__poll(rb, 100); 
+        if (++poll_count % 100 == 0) print_drops(); // Periodic check
     }
 
 cleanup:
