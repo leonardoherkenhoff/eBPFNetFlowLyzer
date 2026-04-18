@@ -1,39 +1,49 @@
 # 🛡️ eBPFNetFlowLyzer
 
-**High-Performance, Dual-Stack (IPv4/IPv6), Stateful Network Feature Extractor Powered by C-eBPF.**
+**Unified, High-Performance, Stateful Network Feature Extractor Powered by C-eBPF/XDP.**
 
 ---
 
 ## 📌 Overview
 
-**eBPFNetFlowLyzer** is a next-generation network traffic feature extractor built for high-throughput environments. By implementing a **100% C-based architecture** utilizing eBPF/XDP for data ingestion and a deeply optimized User-Space daemon, it achieves wire-speed processing (tested up to **480k pps**) with minimal CPU overhead.
+**eBPFNetFlowLyzer** is a next-generation network traffic feature extractor engineered for high-throughput security environments (e.g., Scrubbing Centers). By leveraging a **100% C-native architecture**, it offloads stateful flow aggregation to the **eBPF/XDP** layer, achieving wire-speed processing (validated up to **1.23 Mpps**) with negligible CPU impact (< 4%).
 
-It provides a **Unified Dual-Stack Engine** via IPv4-Mapped IPv6 address space, processing both legacy IPv4 and modern IPv6 traffic through the same O(1) statistical pipeline.
+The system implements a **Unified Dual-Stack Engine**, utilizing 128-bit keying and IPv4-Mapped IPv6 addressing to process **IPv4**, **IPv6**, and **ICMP/ICMPv6** traffic through a single, numerically stable O(1) statistical pipeline.
 
 ## 🚀 Key Features
 
-* **Stateful eBPF Interception**: In-kernel flow aggregation using lock-free `LRU_HASH` tables.
-* **O(1) Statistics (Welford's Algorithm)**: Iterative calculation of Standard Deviation and Mean, eliminating packet storage overhead.
-* **Dual-Stack Unification**: Native 128-bit key architecture supporting **IPv4** and **IPv6** seamlessly.
-* **DNS L7 Offloading**: Safe, verifier-vetted DNS metadata extraction (TTL, Query Count).
+*   **Stateful XDP Ingestion**: In-kernel flow correlation using lock-free `LRU_HASH` tables for maximum throughput and DDoS resistance.
+*   **Multi-Protocol Support**: Comprehensive feature extraction for **TCP**, **UDP**, and **ICMPv6**, ensuring zero-blindness in modern network topologies.
+*   **O(1) Statistics (Welford's Algorithm)**: Real-time calculation of Mean, Variance, and Standard Deviation without buffering packet sequences, ensuring constant-time performance.
+*   **L7 Meta-Extraction**: Safe, verifier-compliant DNS metadata extraction (TTL, Query Count) for high-layer correlation.
+*   **Research Orchestration**: Full-lifecycle benchmarking suite including traffic injection (tcpreplay), hardware monitoring, and ML-ready CSV labeling.
 
 ## 🏛️ Architecture
 
-* **Data Plane (Kernel)**: XDP hook for parsing L2-L4 and performing fast-path flow accounting.
-* **Control Plane (User-Space)**: C Daemon responsible for RingBuffer orchestration, bidirectional state management, and CSV export.
+*   **Data Plane (Kernel Space)**: XDP-based interceptor responsible for early-stage packet parsing and atomic flow accounting.
+*   **Control Plane (User Space)**: High-performance C Daemon that orchestrates the BPF RingBuffer, manages bidirectional flow state, and persists data to CSV.
+*   **Analysis Suite (Python)**: Scientific pipeline for dataset preprocessing, topological labeling, and Machine Learning validation (Random Forest).
 
-## 🛠️ Build Requirements
+## 🛠️ Build & Execution
 
-* **Linux Kernel**: 5.4+ (CO-RE enabled).
-* **Compiler**: `clang` / `llvm` (v12+).
-* **Libs**: `libbpf`, `libelf`, `zlib`.
+### Prerequisites
+*   **Linux Kernel**: 5.10+ (CO-RE enabled)
+*   **Toolchain**: `clang` / `llvm` (v12+), `libbpf`, `libelf`, `zlib`, `uthash`.
 
+### Compilation
 ```bash
-# Compile
+# Standard Build
 make clean && make all
+```
 
-# Run (Attach to Interface)
-sudo ./build/loader <interface_name> > flow_results.csv
+### Research Pipeline
+```bash
+# Automated Benchmark Execution
+python3 scripts/testbed/ebpf_wrapper.py
+
+# Dataset Labeling & ML Analysis
+python3 scripts/preprocessing/ebpf_labeler.py
+python3 scripts/analysis/ebpf_run_benchmark.py
 ```
 
 ## ⚖️ License
