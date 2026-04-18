@@ -1,6 +1,6 @@
-# 🗺️ eBPFNetFlowLyzer Development Roadmap
+# 🗺️ eBPFNetFlowLyzer Development Roadmap (Extractor-Centric)
 
-This document outlines the strategic milestones and technical trajectory for the eBPFNetFlowLyzer project.
+This document outlines the strategic trajectory for eBPFNetFlowLyzer, prioritizing its evolution as a world-class network feature extractor.
 
 ## 🏁 Phase 1: Foundation (v1.0) - [COMPLETED]
 - [x] High-performance Data Plane (XDP/C).
@@ -11,24 +11,29 @@ This document outlines the strategic milestones and technical trajectory for the
 
 ---
 
-## 🚀 Phase 2: Visibility & Scalability (v2.0) - [PLANNED]
+## 🚀 Phase 2: Advanced Extraction Capabilities (v2.0) - [PLANNED]
 
-### Milestone 1: Advanced Protocol Parsing
-- [ ] **Tunneling Decapsulation**: Support for GRE, VXLAN, and IP-in-IP to unmask tunneled DDoS traffic.
-- [ ] **L7 HTTPS SNI Extraction**: Implementation of a non-intrusive TLS handshake parser to extract domain metadata.
-- [ ] **QUIC/HTTP3 Entropy Analysis**: Statistical identification of encrypted high-layer floods.
+### Milestone 1: Deep Network Visibility
+*Focus: Eliminating blind spots in modern infrastructure.*
+- [ ] **Tunneling Decapsulation**: In-kernel stripping of GRE, VXLAN, and IP-in-IP headers to extract inner 5-tuple features.
+- [ ] **L7 SNI Extraction**: Non-intrusive TLS handshake parsing in XDP to identify domain names (HTTPS metadata).
+- [ ] **QUIC/HTTP3 Feature Mapping**: Heuristic-based feature extraction for UDP-based encrypted web traffic.
+- [ ] **ICMPv6 Specific Features**: Dedicated counters for RA/RS, Neighbor Solicitation, and Echo Request/Reply ratios.
 
-### Milestone 2: Production-Grade Observability
-- [ ] **Prometheus/Grafana Integration**: Native exporter for real-time flow metrics and PPS/BPS monitoring.
-- [ ] **System Health Telemetry**: In-kernel drops and map utilization metrics.
+### Milestone 2: Industrial Scalability & Performance
+*Focus: Scaling the extractor for high-density scrubbing environments.*
+- [ ] **Multi-Interface Ingestion**: Unified aggregation from multiple NICs into a single flow table.
+- [ ] **Dynamic RingBuffer Tuning**: Adaptive buffer sizing based on real-time PPS to prevent packet drops during volumetric floods.
+- [ ] **XDP Driver-Mode & Offload**: Optimization for hardware-level XDP offloading (NIC-level execution).
 
-### Milestone 3: Real-Time Mitigation Engine
-- [ ] **In-Daemon Inference**: Porting the Random Forest classifier to the C-Daemon for real-time attack detection.
-- [ ] **Dynamic XDP Drop**: Implementation of an eBPF map-driven blocklist for immediate mitigation of identified malicious flows.
+### Milestone 3: Advanced Flow Metadata (The "Lyzer" Expansion)
+*Focus: Providing higher-quality data for Machine Learning models.*
+- [ ] **TCP State Analytics**: Tracking retransmissions, Out-of-Order packets, and Zero-Window signals.
+- [ ] **Payload Entropy Calculation**: Real-time measurement of packet payload entropy to identify encrypted vs. plain-text floods.
+- [ ] **Flow Directionality (Forward/Backward)**: Enhanced logic for symmetrical flow correlation in multi-homed environments.
 
 ---
 
-## 🛠️ Phase 3: Enterprise Features (v3.0) - [RESEARCH]
-- [ ] **Hardware Offload (AF_XDP)**: Transition to zero-copy data paths for Multi-100G environments.
-- [ ] **Distributed Flow Correlation**: Aggregation of flows across multiple scrubbing nodes.
-- [ ] **Autonomous Tuning**: ML-driven dynamic adjustment of eBPF map sizes and sampling rates.
+## 🛠️ Phase 4: Long-term Evolution (v3.0) - [RESEARCH]
+- [ ] **Real-time Inference Integration**: Using the extractor features for immediate detection.
+- [ ] **Prometheus/Grafana Export**: Standardizing the telemetry output.
