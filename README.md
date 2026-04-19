@@ -32,9 +32,9 @@ A decentralized C-Daemon utilizing **Shared-Nothing Workers**. Each worker manag
 
 ---
 
-## 🎓 Etymology & Scholarly Context
+## 🎓 Etymology & Concept
 
-The choice of **Lynceus** pays homage to the **Accademia dei Lincei** (Academy of the Lynxes), founded in 1603. Like the members of the academy (including Galileo Galilei), this project seeks to apply "lynx-like" vision to the natural world—in this case, the complex and often opaque dynamics of multi-gigabit network traffic.
+The name is inspired by **Lynceus**, the Argonaut possessing legendary vision. In Greek mythology, Lynceus was capable of seeing through any physical barrier—be it earth, stone, or deep water. This serves as the perfect metaphor for this engine's mission: utilizing eBPF/XDP to provide deep, "X-ray" introspection into kernel-space network flows, exposing features that are invisible to traditional observation methods.
 
 ---
 
