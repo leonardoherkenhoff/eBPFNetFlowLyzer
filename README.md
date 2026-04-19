@@ -1,84 +1,54 @@
-<div align="center">
-    <h1>🛡️ eBPFNetFlowLyzer</h1>
-    <i>High-Performance, Dual-Stack (IPv4/IPv6), Stateful Network Feature Extractor Powered by 100% C-eBPF.</i>
-</div>
+# 🛡️ eBPFNetFlowLyzer v1.9.1
 
-<br>
-
-## 📌 Abstract
-
-**eBPFNetFlowLyzer** is a next-generation network traffic feature extractor designed to resolve the systematic biases and performance bottlenecks in legacy IDS benchmarking. By unrolling the extraction logic into a **100% End-to-End C Architecture** utilizing eBPF/XDP for the Data Plane and a deeply optimized libbpf daemon for the Control Plane, it achieves wire-speed throughput (Tested up to **480k pps**) with zero packet loss and a sub-3% CPU footprint.
-
-It implements a **Unified Dual-Stack Engine** through IPv4-Mapped IPv6 address space, ensuring that legacy IPv4 datasets (like CICDDoS2019) and modern IPv6 infrastructures (e.g., IoT/6LoWPAN) are processed through the same O(1) statistical pipeline.
-
-## 🎯 Key Research Contributions
-
-1. **Stateful eBPF Interception**: Replaces traditional `libpcap` loops with lock-free `BPF_MAP_TYPE_LRU_HASH` tables, eliminating "Aggregation Collapse" during volumetric DDoS.
-2. **O(1) Statistics via Welford's Algorithm**: Bidirectional flow features (Standard Deviation, Mean, IAT) are calculated iteratively, removing the memory overhead of packet arrays.
-3. **Resilient L7 Offloading**: Integrated DNS parsing engine with strict BPF-Verifier-vetted pointer boundary checks for TTL and Query extraction.
-4. **Dual-Stack Unification**: Native support for **IPv6** and **IPv4** through a unified 128-bit key architecture.
+**Unified, High-Performance, Stateful Network Feature Extractor Powered by C-eBPF/XDP.**
 
 ---
 
-## 🏛️ Architecture Blueprint
+## 📌 Overview
 
-```mermaid
-graph TD
-    A([Raw Network Traffic]) -->|Ingress Rx| XDP{XDP Hook / C-eBPF}
-    
-    subgraph KERNEL SPACE [CO-RE Fast-Path]
-    XDP -->|L2/L3 Unified Parse| PARSER[Dual-Stack Parser]
-    PARSER -->|IPv4-Map to IPv6| KEYGEN[128-bit Key Generator]
-    KEYGEN -->|Flow Aggregation| LRU[(Map: Flow State Cache)]
-    PARSER -->|Submit Metadata| RINGBUF[BPF RingBuffer]
-    end
-    
-    subgraph USER SPACE [C Daemon]
-    RINGBUF -->|ring_buffer__poll| DAEMON(libbpf Control Plane)
-    DAEMON -->|L3/L4 Math| MATH[Welford Statistics Engine]
-    DAEMON -->|L7 Strings| DNS[Pointer-Safe DNS Decoder]
-    MATH --> CSV([ML-Ready CSV Ground Truth])
-    DNS --> CSV
-    end
-```
+**eBPFNetFlowLyzer** is a next-generation network traffic feature extractor engineered for high-throughput security environments and academic research. By leveraging a **100% C-native architecture**, it offloads stateful flow aggregation to the **eBPF/XDP** layer, achieving massive throughput with negligible CPU impact.
 
----
+The system implements a **Unified Master Feature Matrix**, achieving 100% taxonomic parity with leading research tools (**NTLFlowLyzer** and **ALFlowLyzer**). It utilizes a single, numerically stable O(1) statistical pipeline to process **IPv4**, **IPv6**, and **ICMP/ICMPv6** traffic, capturing atomic bidirectional telemetry at line-rate.
 
-## 🛠️ Reproducibility & Deployment
+## 🚀 Key Features (v1.9.1)
 
-### Toolchain Requirements
-* **Compiler**: `clang`, `llvm` (v12+ for BTF support).
-* **Libraries**: `libbpf`, `libelf`, `zlib`.
-* **Environment**: Linux Kernel 5.4+ (Bare-Metal recommended for XDP performance).
+*   **Unified Taxonomic Matrix**: Consolidation of 348 (NTL) and 130 (AL) features into a single, non-redundant high-dimensional space for DDoS research.
+*   **Stateful XDP Ingestion**: In-kernel flow correlation using lock-free hash tables for maximum throughput and resistance to volumetric flooding.
+*   **O(1) Statistical Moments**: Real-time calculation of Mean ($\mu$), Variance ($\sigma^2$), Skewness ($\gamma$), and Kurtosis ($\kappa$) using Pébay's incremental update formulas.
+*   **Advanced Metric Estimation**: Real-time $O(1)$ estimators for **Median** (Iterative SGD) and **Mode** (Histogram-based), enabling absolute parity with offline extractors.
+*   **I/O Accelerated Extraction**: Optimized 1MB full-buffer output engine capable of sustaining zero-loss capture for 33M+ packet datasets.
+*   **Research Orchestration**: Full-lifecycle benchmarking suite including traffic injection (tcpreplay), hardware monitoring, and ML-ready CSV labeling for SBSeg 2026 standards.
 
-### Build & Run
+## 🏛️ Architecture
+
+*   **Data Plane (Kernel Space)**: XDP-based interceptor responsible for early-stage packet parsing, 5-tuple normalization, and atomic flow event streaming via RingBuffer.
+*   **Control Plane (User Space)**: High-performance C Daemon that orchestrates the BPF RingBuffer, implements the 10-moment statistical engine, and persists data via accelerated I/O.
+*   **Analysis Suite (Python)**: Scientific pipeline for dataset preprocessing, topological ground truth labeling, and Machine Learning validation (Random Forest).
+
+## 🛠️ Build & Execution
+
+### Prerequisites
+*   **Linux Kernel**: 5.15+ (RingBuffer support)
+*   **Toolchain**: `clang` / `llvm` (v12+), `libbpf`, `libelf`, `zlib`.
+
+### Compilation
 ```bash
-# 1. Compile the Kernel Program and User Daemon
+# Standard Build
 make clean && make all
-
-# 2. Attach to Interface (e.g., eth0)
-sudo ./build/loader eth0 > features_output.csv
 ```
 
----
-
-## 📚 Citation
-
-If you use **eBPFNetFlowLyzer** in your academic research, please cite it as follows:
-
-```latex
-@software{herkenhoff2026ebpf,
-  author = {Herkenhoff, Leonardo},
-  title = {eBPFNetFlowLyzer: High-Performance Dual-Stack Network Feature Extractor},
-  year = {2026},
-  url = {https://github.com/leonardoherkenhoff/eBPFNetFlowLyzer},
-  version = {2.0.0-dualstack}
-}
+### Research Pipeline
+```bash
+# Automated Benchmark Execution (PCAP Ingestion)
+sudo python3 scripts/analysis/ebpf_full_experiment.py
 ```
+
+## ⚖️ License
+
+Distributed under the **GNU General Public License v2.0**. See `LICENSE` for more information.
 
 ---
 
 <p align="center">
-  <br>
   <i>Developed for the Master's Thesis in Network Security and DDoS Mitigation.</i>
 </p>
