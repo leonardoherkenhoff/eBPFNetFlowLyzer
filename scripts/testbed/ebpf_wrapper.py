@@ -89,9 +89,8 @@ def process_pcap_dir(pcap_dir, category):
                         if not line: break
                         f_log.write(line)
                         f_log.flush()
-                        # Advanced Diagnostic Filter
-                        if any(x in line for x in ["📊", "⚠️", "❌", "System", "Error", "Fatal", "└─", "[Diagnostic]", "[Parser Errors]", "-"]):
-                            print(f"   [Loader] {line.strip()}")
+                        # Forensic Mode: Show all loader output
+                        print(f"   [Loader] {line.strip()}")
             
             log_thread = threading.Thread(target=stream_logs, args=(proc_loader, loader_log_path), daemon=True)
             log_thread.start()
@@ -119,6 +118,8 @@ def process_pcap_dir(pcap_dir, category):
                         if "packets" in line and "sent" in line:
                             try: total_packets += int(line.split()[0])
                             except: pass
+                    if total_packets == 0:
+                        print(f"   ⚠️ Warning: tcpreplay sent 0 packets. Raw output:\n{res.stdout}")
                 except subprocess.CalledProcessError as e:
                     print(f"   ❌ Replay Error: {e.stderr}")
 
