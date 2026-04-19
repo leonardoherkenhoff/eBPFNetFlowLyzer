@@ -1,23 +1,6 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator.
- * 
- * @details 
- * Implements a high-performance, multi-threaded flow extraction engine using 
- * eBPF/XDP for data ingestion and a Shared-Nothing architecture in user-space.
- * 
- * Key Design Principles:
- * 1. **Shared-Nothing Parallelism**: One worker thread per CPU core, pinned via 
- *    affinity, with local Flow Tables to eliminate cache contention and mutex locks.
- * 2. **Welford's Algorithm**: Numerically stable, $O(1)$ calculation of the 
- *    first four statistical moments:
- *    - Mean: $\bar{x}_n = \bar{x}_{n-1} + \frac{x_n - \bar{x}_{n-1}}{n}$
- *    - Variance: $M_{2,n} = M_{2,n-1} + (x_n - \bar{x}_{n-1})(x_n - \bar{x}_n)$
- * 3. **Segmented Flow-Level Export**: Agnostic aggregation with state-driven 
- *    flushing (FIN/RST, Timeout, or Threshold-based segmentation).
- * 
- * @author Leonardo Herkenhoff (Senior Research Partner)
- * @version 2.4-Standard
+ * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator (v2.5).
  */
 
 #define _GNU_SOURCE
@@ -41,34 +24,25 @@
 #include <sys/stat.h>
 
 /** @brief Global Configuration Constants */
-#define FLOW_HASH_SIZE 131072       /**< Optimized for 128k concurrent flows per core */
-#define IO_BUFFER_SIZE (8 * 1024 * 1024) /**< 8MB Per-Core Buffered I/O */
-#define IDLE_TIMEOUT_NS 60000000000ULL   /**< 60s Flow Expiration */
-#define IDLE_THRESHOLD 1.0               /**< 1s gap for Idle/Active state transition */
-#define SEGMENT_THRESHOLD 100            /**< Micro-batch granularity for DDoS research */
-#define HIST_BINS 64                    /**< 64-Bin Payload Histogram Resolution */
+#define FLOW_HASH_SIZE 131072
+#define IO_BUFFER_SIZE (8 * 1024 * 1024)
+#define IDLE_TIMEOUT_NS 60000000000ULL 
+#define IDLE_THRESHOLD 1.0
+#define SEGMENT_THRESHOLD 100 
+#define HIST_BINS 64
 
-/**
- * @brief Canonical 5-Tuple Key for Flow Identification.
- */
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
     uint16_t src_port; uint16_t dst_port;
     uint8_t protocol;
 } __attribute__((packed));
 
-/**
- * @brief Static Flow Metadata for Lifecycle Tracking.
- */
 struct flow_meta {
     uint64_t start_time;
     uint8_t ip_ver; uint16_t eth_proto;
     uint8_t src_mac[6]; uint8_t dst_mac[6];
 } __attribute__((packed));
 
-/**
- * @brief Per-Packet Telemetry Event from eBPF RingBuffer.
- */
 struct packet_event_t {
     struct flow_key key;
     struct flow_meta meta;
@@ -81,29 +55,12 @@ struct packet_event_t {
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
-/**
- * @brief Welford Accumulator for On-line Moments Calculation.
- */
 struct w_stat {
-    uint64_t n;         /**< Sample Count */
-    double M1, M2, M3, M4; /**< Statistical Moments M1-M4 */
-    uint32_t max, min;  /**< Range Extremes */
-    uint64_t hist[HIST_BINS]; /**< Distribution Histogram */
+    uint64_t n; double M1, M2, M3, M4; uint32_t max, min;
+    uint64_t hist[HIST_BINS];
 };
 
-/**
- * @brief Initializes a Welford accumulator.
- * @param w Pointer to the w_stat structure.
- */
 static void w_init(struct w_stat *w) { memset(w, 0, sizeof(*w)); w->min = 0xFFFFFFFF; }
-
-/**
- * @brief Updates Welford moments with a new sample.
- * @details Implements numerically stable online calculation of Mean, Variance, 
- * Skewness, and Kurtosis in $O(1)$.
- * @param w Pointer to the accumulator.
- * @param x The new sample value.
- */
 static inline void w_update(struct w_stat *w, double x) {
     uint64_t n1 = w->n; w->n++;
     double delta = x - w->M1, delta_n = delta / w->n, delta_n2 = delta_n * delta_n, term1 = delta * delta_n * n1;
@@ -119,13 +76,12 @@ static inline double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / 
 static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
 static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
 
-/**
- * @brief Comprehensive Flow State - The "399 Feature" Matrix.
- */
 struct flow_state {
     struct flow_key key; struct flow_meta meta;
     struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat, active_s, idle_s, win_s;
+    struct w_stat t_pay_delta, f_pay_delta, b_pay_delta; /**< Size Deltas */
     uint64_t f_bytes, b_bytes, f_last, b_last, t_last, active_start;
+    uint32_t f_last_sz, b_last_sz, t_last_sz;
     uint16_t f_win_init, b_win_init;
     uint64_t flags[8], f_flags[8], b_flags[8];
     uint32_t dns_q_count, dns_a_count;
@@ -133,9 +89,6 @@ struct flow_state {
     int active;
 };
 
-/**
- * @brief Worker Thread Context for Partitioned I/O.
- */
 struct worker_t {
     pthread_t thread; int rb_fd; struct ring_buffer *rb;
     struct flow_state *flow_table; FILE *out_f;
@@ -147,17 +100,11 @@ static int num_workers = 1;
 static volatile bool exiting = false;
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
-/**
- * @brief Returns monotonic time in nanoseconds.
- */
 static uint64_t get_nstime(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-/**
- * @brief Calculates Shannon Entropy for the given byte sequence.
- */
 static double calculate_entropy(const uint8_t *data, size_t len) {
     if (len == 0) return 0;
     uint64_t counts[256] = {0}; for (size_t i = 0; i < len; i++) counts[data[i]]++;
@@ -166,12 +113,6 @@ static double calculate_entropy(const uint8_t *data, size_t len) {
     return ent;
 }
 
-/**
- * @brief Serializes the flow state to CSV at the end of a lifecycle.
- * @param w Pointer to the worker context.
- * @param s Pointer to the flow state.
- * @param ts_ns Timestamp of the flush event.
- */
 static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns) {
     char sip[64], dip[64];
     if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &s->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &s->key.dst_ip[12], dip, 64); }
@@ -180,6 +121,7 @@ static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns)
     w->s_off += snprintf(w->s_buf + w->s_off, 16384, "%s-%s-%u-%u-%u,%.6f,%s,%u,%s,%u,%u,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,", sip, dip, ntohs(s->key.src_port), ntohs(s->key.dst_port), s->key.protocol, (double)s->meta.start_time/1e9, sip, ntohs(s->key.src_port), dip, ntohs(s->key.dst_port), s->key.protocol, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes);
     #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_skew(&W), w_kurt(&W))
     FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr); FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->active_s); FMT_W(s->idle_s); FMT_W(s->win_s);
+    FMT_W(s->t_pay_delta); FMT_W(s->f_pay_delta); FMT_W(s->b_pay_delta);
     w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,", s->f_win_init, s->b_win_init, (duration > 0 ? (s->f_bytes+s->b_bytes)/duration : 0), (duration > 0 ? s->f_bytes/duration : 0), (duration > 0 ? s->b_bytes/duration : 0), (duration > 0 ? s->t_pay.n/duration : 0), (duration > 0 ? s->b_pay.n/duration : 0), (duration > 0 ? s->f_pay.n/duration : 0), (s->f_pay.n > 0 ? (double)s->b_pay.n/s->f_pay.n : 0));
     for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
     #define FMT_H(W) for(int i=0; i<HIST_BINS; i++) w->s_off += snprintf(w->s_buf + w->s_off, 128, "%lu,", W.hist[i])
@@ -188,9 +130,6 @@ static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns)
     if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
 }
 
-/**
- * @brief eBPF Event Handler - Per-Packet Ingestion Callback.
- */
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz; struct worker_t *w = ctx; const struct packet_event_t *e = data;
     uint32_t h = 0; const uint8_t *p = (const uint8_t *)&e->key;
@@ -204,6 +143,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         w_init(&w->flow_table[idx].t_hdr); w_init(&w->flow_table[idx].f_hdr); w_init(&w->flow_table[idx].b_hdr);
         w_init(&w->flow_table[idx].t_iat); w_init(&w->flow_table[idx].f_iat); w_init(&w->flow_table[idx].b_iat);
         w_init(&w->flow_table[idx].active_s); w_init(&w->flow_table[idx].idle_s); w_init(&w->flow_table[idx].win_s);
+        w_init(&w->flow_table[idx].t_pay_delta); w_init(&w->flow_table[idx].f_pay_delta); w_init(&w->flow_table[idx].b_pay_delta);
         w->flow_table[idx].active = 1; w->flow_table[idx].active_start = e->timestamp_ns;
         if (e->is_fwd) w->flow_table[idx].f_win_init = e->window_size; else w->flow_table[idx].b_win_init = e->window_size;
     }
@@ -212,19 +152,20 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         double iat = (double)(e->timestamp_ns - s->t_last) / 1e9;
         w_update(&s->t_iat, iat);
         if (iat > IDLE_THRESHOLD) { w_update(&s->active_s, (double)(s->t_last - s->active_start) / 1e9); w_update(&s->idle_s, iat); s->active_start = e->timestamp_ns; }
+        w_update(&s->t_pay_delta, abs((int)e->payload_len - (int)s->t_last_sz));
     }
-    s->t_last = e->timestamp_ns;
+    s->t_last = e->timestamp_ns; s->t_last_sz = e->payload_len;
     w_update(&s->t_pay, e->payload_len); w_update(&s->t_hdr, e->header_len);
     if (e->key.protocol == 6) w_update(&s->win_s, e->window_size);
     if (e->dns_answer_count > 0) { s->dns_a_count += e->dns_answer_count; s->dns_q_count++; }
     s->last_entropy = calculate_entropy(e->payload_hint, 64);
     if (e->is_fwd) {
-        if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
-        s->f_last = e->timestamp_ns; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
+        if (s->f_last > 0) { w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9); w_update(&s->f_pay_delta, abs((int)e->payload_len - (int)s->f_last_sz)); }
+        s->f_last = e->timestamp_ns; s->f_last_sz = e->payload_len; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
         s->f_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
     } else {
-        if (s->b_last > 0) w_update(&s->b_iat, (double)(e->timestamp_ns - s->b_last) / 1e9);
-        s->b_last = e->timestamp_ns; w_update(&s->b_pay, e->payload_len); w_update(&s->b_hdr, e->header_len);
+        if (s->b_last > 0) { w_update(&s->b_iat, (double)(e->timestamp_ns - s->b_last) / 1e9); w_update(&s->b_pay_delta, abs((int)e->payload_len - (int)s->b_last_sz)); }
+        s->b_last = e->timestamp_ns; s->b_last_sz = e->payload_len; w_update(&s->b_pay, e->payload_len); w_update(&s->b_hdr, e->header_len);
         s->b_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
     }
     bool flush = (e->tcp_flags & 0x05) || (s->t_pay.n >= SEGMENT_THRESHOLD);
@@ -233,9 +174,6 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
-/**
- * @brief Main Worker Loop - Polls RingBuffer and performs Timeout Scans.
- */
 void *worker_fn(void *arg) {
     struct worker_t *w = arg; cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 256, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
@@ -243,8 +181,8 @@ void *worker_fn(void *arg) {
     w->out_f = fopen(fname, "w"); if (!w->out_f) return NULL;
     setvbuf(w->out_f, NULL, _IOFBF, IO_BUFFER_SIZE);
     fprintf(w->out_f, "flow_id,timestamp,src_ip,src_port,dst_ip,dst_port,protocol,duration,pkt_count,fwd_count,bwd_count,tot_bytes,fwd_bytes,bwd_bytes,");
-    const char *metrics[] = {"pay", "fwd_pay", "bwd_pay", "hdr", "fwd_hdr", "bwd_hdr", "iat", "fwd_iat", "bwd_iat", "active", "idle", "win"};
-    for(int i=0; i<12; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
+    const char *metrics[] = {"pay", "fwd_pay", "bwd_pay", "hdr", "fwd_hdr", "bwd_hdr", "iat", "fwd_iat", "bwd_iat", "active", "idle", "win", "pay_delta", "fwd_pay_delta", "bwd_pay_delta"};
+    for(int i=0; i<15; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
     fprintf(w->out_f, "fwd_win_init,bwd_win_init,bytes_rate,fwd_bytes_rate,bwd_bytes_rate,packets_rate,bwd_packets_rate,fwd_packets_rate,down_up_rate,");
     const char *flags[] = {"fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr"};
     for(int i=0; i<8; i++) fprintf(w->out_f, "%s_cnt,fwd_%s_cnt,bwd_%s_cnt,", flags[i], flags[i], flags[i]);
@@ -277,7 +215,7 @@ int main(int argc, char **argv) {
         workers[i].id = i; workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scholarly Orchestrator Ready)\n", num_workers);
+    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Total Statistical Depth Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
