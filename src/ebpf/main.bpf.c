@@ -96,14 +96,18 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
         
-        /* Deep Extension Traversal (Verifier-Safe) */
+        /* Mathematically Correct IPv6 Extension Skip (Verifier-Safe) */
         #pragma unroll
         for (int i = 0; i < 2; i++) {
             if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44) {
                 struct { __u8 next; __u8 len; } *ext = next;
                 if ((void *)(ext + 1) > data_end) break;
                 *l4_proto = ext->next;
-                next += 8; 
+                // Total len = (ext->len + 1) * 8 octets.
+                // We mask len to satisfy the verifier's bound tracking.
+                __u16 delta = (ext->len + 1) << 3;
+                if (delta > 128) delta = 128; // Hard limit for verifier safety
+                next += delta;
             } else break;
         }
         *l4_hdr = next;
@@ -159,7 +163,7 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    /* 1. Handle LLC/SNAP Encapsulation */
+    /* Handle LLC/SNAP */
     if (eth_proto < 1536) {
         if (l3_hdr + 8 > data_end) return XDP_PASS;
         __u8 *llc = l3_hdr;
@@ -169,7 +173,7 @@ int xdp_prog(struct xdp_md *ctx) {
         } else return XDP_PASS;
     }
 
-    /* 2. Handle Multi-VLAN Tagging (Double VLAN / QinQ) */
+    /* Handle Multi-VLAN Tagging (QinQ) */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
@@ -223,7 +227,6 @@ int xdp_prog(struct xdp_md *ctx) {
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - head_len;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else if (l4_proto == IPPROTO_FRAGMENT) {
-        /* Capture IPv6 Fragments as distinct flows (Milestone 3 visibility) */
         sport = 0; dport = 0; head_len = 8;
         pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - 8;
         ttl = ((struct ipv6hdr *)l3_hdr)->hop_limit;
