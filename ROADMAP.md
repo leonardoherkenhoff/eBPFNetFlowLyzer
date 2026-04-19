@@ -1,33 +1,37 @@
 # 🗺️ Lynceus Project Roadmap
 
-This document outlines the strategic evolution of the **Lynceus** eBPF engine, transitioning from a high-fidelity research extractor to a fully autonomous network security infrastructure.
+Este documento define a trajetória estratégica do motor **Lynceus**, evoluindo de um extrator de alta fidelidade para uma infraestrutura de segurança autônoma.
 
 ---
 
-## ✅ Phase 1: High-Performance Extraction (v1.0 - v2.0)
-*Target: Research Integrity and Core Performance.*
-- [x] **Shared-Nothing Architecture**: N-Core scalability via Map-in-Map.
-- [x] **Partitioned I/O**: Mutex-free telemetry persistence.
-- [x] **Statistical Fidelity**: Welford's Algorithm for 4th-order moments.
-- [x] **IPv4/IPv6 Parity**: Full dual-stack support (TCP/UDP/ICMP/ICMPv6).
-- [x] **Professional Rebranding**: Transition to the 'Lynceus' identity.
+## ✅ Fase 1: Extração de Alta Performance (Concluída)
+*Objetivo: Integridade de Pesquisa e Vazão Wire-Speed.*
+
+- [x] **Arquitetura Shared-Nothing**: Escalabilidade N-Core linear via isolamento de memória por CPU.
+- [x] **Persistência Particionada**: Escrita em CSV sem contenção de lock global.
+- [x] **Matriz de 399 Características**: Paridade total (NTL+AL) com 192 bins de histograma.
+- [x] **Fidelidade Estatística**: Algoritmo de Welford para momentos de 4ª ordem ($O(1)$).
+- [x] **Visibilidade Protocolar Universal**: Suporte a IPv4/v6, TCP, UDP, ICMP-ID, SCTP, IGMP e decapsulamento de túneis (GRE/VXLAN) e QinQ.
+- [x] **Identidade Profissional**: Consolidação da marca Lynceus para a comunidade.
 
 ---
 
-## 🚀 Phase 2: Intelligence & Fingerprinting (v2.x)
-*Target: Advanced Feature Engineering.*
-- [ ] **L7 Deep Dissection**: Native eBPF support for HTTP/2 and QUIC fingerprinting.
-- [ ] **Entropy Drift Analysis**: Real-time Shannon entropy monitoring for encrypted traffic anomalies.
-- [ ] **Shared-Nothing State Management**: Core-local state tracking for complex protocol transitions.
-- [ ] **Agnostic Export**: Integration with Prometheus/Grafana via custom exporter.
+## 🚀 Fase 2: Inteligência e Observabilidade Avançada
+*Objetivo: Engenharia de Características Complexas.*
+
+- [ ] **Dissecção L7 Profunda**: Suporte nativo eBPF para fingerprinting de **HTTP/2** e **QUIC**.
+- [ ] **Análise de Drift de Entropia**: Monitoramento temporal da Entropia de Shannon para detecção de anomalias em tráfego criptografado.
+- [ ] **Gestão de Estado Distribuída**: Rastreamento de transições de protocolo complexas (ex: Handshakes) em ambiente multi-core.
+- [ ] **Exportação Agnóstica**: Integração com **Prometheus/Grafana** via exportador customizado de baixa latência.
 
 ---
 
-## 🧠 Phase 3: Autonomous Response (v3.0)
-*Target: The MAPE-K Closed-Loop.*
-- [ ] **ML Inference in Kernel**: Loading quantized models (XDP-Tail-Calls) for real-time packet classification.
-- [ ] **Dynamic Mitigation**: Automated `XDP_DROP` or `XDP_REDIRECT` based on ML confidence levels.
-- [ ] **Feedback Loop**: Self-correcting thresholds via user-space MAPE-K orchestration.
+## 🧠 Fase 3: Resposta Autônoma (MAPE-K)
+*Objetivo: O Loop Fechado de Mitigação.*
+
+- [ ] **Inferência ML no Kernel**: Execução de modelos quantizados (via XDP Tail-Calls) para classificação em tempo real.
+- [ ] **Mitigação Dinâmica**: Ações automatizadas de `XDP_DROP` ou `XDP_REDIRECT` baseadas em níveis de confiança estatística.
+- [ ] **Feedback Loop**: Orquestração MAPE-K em user-space para ajuste dinâmico de limiares de detecção.
 
 ---
-**Lynceus: Precise Vision, Absolute Integrity.**
+**Lynceus: Visão Precisa, Integridade Absoluta.**
