@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" width="200" alt="Lynceus Logo">
+</p>
+
 # 🛡️ Lynceus v2.0
 
 **Massively Parallel eBPF Flow Extraction Engine.**
