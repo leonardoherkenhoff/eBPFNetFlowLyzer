@@ -27,7 +27,7 @@
 #define IO_BUFFER_SIZE (8 * 1024 * 1024)
 #define IDLE_TIMEOUT_NS 60000000000ULL 
 #define IDLE_THRESHOLD 1.0
-#define SEGMENT_THRESHOLD 5000 
+#define SEGMENT_THRESHOLD 100 
 #define HIST_BINS 64
 
 struct flow_key {
