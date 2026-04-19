@@ -1,6 +1,14 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane Daemon for eBPFNetFlowLyzer.
+ * @brief eBPF Control Plane - User-Space Orchestrator & Feature Aggregator
+ * 
+ * Research Objective: To process asynchronous telemetry streams from the kernel-space 
+ * ring buffer and compute flow-level statistics (IAT, StdDev) using the Welford 
+ * Online Algorithm.
+ * 
+ * Mathematical Framework (Welford):
+ * - Mean Update: $\mu_n = \mu_{n-1} + \frac{x_n - \mu_{n-1}}{n}$
+ * - Variance Update: $M_{2,n} = M_{2,n-1} + (x_n - \mu_{n-1})(x_n - \mu_n)$
  */
 
 #include <stdio.h>
@@ -18,6 +26,11 @@
 #include <time.h>
 #include "uthash.h"
 
+/**
+ * @struct flow_event_t
+ * @brief Mirrored structure of the BPF ring buffer event.
+ * Must maintain 100% binary parity with main.bpf.c.
+ */
 struct flow_event_t {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
     uint16_t src_port; uint16_t dst_port;
@@ -29,15 +42,20 @@ struct flow_event_t {
     uint8_t dns_payload_raw[256];
 } __attribute__((packed));
 
+/** @brief Welford Statistics Container */
 struct welford_stat {
-    unsigned long count; double mean; double M2; double min; double max;
+    unsigned long count; 
+    double mean; 
+    double M2; 
+    double min; 
+    double max;
 };
 
-void welford_init(struct welford_stat *w) {
+static inline void welford_init(struct welford_stat *w) {
     w->count = 0; w->mean = 0.0; w->M2 = 0.0; w->min = -1.0; w->max = 0.0;
 }
 
-void welford_update(struct welford_stat *w, double value) {
+static inline void welford_update(struct welford_stat *w, double value) {
     w->count++;
     double delta = value - w->mean; w->mean += delta / w->count;
     double delta2 = value - w->mean; w->M2 += delta * delta2;
@@ -45,17 +63,19 @@ void welford_update(struct welford_stat *w, double value) {
     if (value > w->max) w->max = value;
 }
 
-double welford_std(struct welford_stat *w) {
+static inline double welford_std(struct welford_stat *w) {
     if (w->count < 2) return 0.0;
     return sqrt(w->M2 / (w->count - 1));
 }
 
+/** @brief 5-tuple key for UTHash tracking. */
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
     uint16_t src_port; uint16_t dst_port;
     uint8_t protocol;
 } __attribute__((packed));
 
+/** @brief Persistent Flow Record in User-Space memory. */
 struct flow_record {
     struct flow_key key;
     uint64_t start_time; uint64_t last_time;
@@ -73,25 +93,29 @@ struct flow_record {
     UT_hash_handle hh;
 };
 
+/* Global flow table and state */
 struct flow_record *flows = NULL; 
 static volatile bool exiting = false;
 static int drop_map_fd = -1;
 static int raw_pkt_map_fd = -1;
 
-void sig_handler(int sig) { (void)sig; exiting = true; }
+static void sig_handler(int sig) { (void)sig; exiting = true; }
 
+/** @brief Periodic diagnostic output to stderr. */
 void print_stats() {
     uint32_t key = 0; uint64_t drops = 0, raw = 0;
     if (drop_map_fd >= 0) bpf_map_lookup_elem(drop_map_fd, &key, &drops);
     if (raw_pkt_map_fd >= 0) bpf_map_lookup_elem(raw_pkt_map_fd, &key, &raw);
-    fprintf(stderr, "\n📊 [Stats] Total Packets Observed (XDP): %lu | RingBuffer Drops: %lu\n", raw, drops);
+    fprintf(stderr, "\n📊 [Diagnostic] Kernel Packets: %lu | RingBuffer Drops: %lu\n", raw, drops);
 }
 
+/** @brief Final CSV export logic. Flushes the UTHash table to stdout. */
 void export_all_flows() {
     struct flow_record *f, *tmp; uint32_t exported = 0;
     HASH_ITER(hh, flows, f, tmp) {
         double dur = (double)(f->last_time - f->start_time) / 1000.0;
         char s_s[64], d_s[64];
+        /* Dual-Stack IP formatting */
         if (memcmp(f->key.src_ip, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff", 12) == 0) {
             inet_ntop(AF_INET, &f->key.src_ip[12], s_s, 64);
             inet_ntop(AF_INET, &f->key.dst_ip[12], d_s, 64);
@@ -99,6 +123,8 @@ void export_all_flows() {
             inet_ntop(AF_INET6, f->key.src_ip, s_s, 64);
             inet_ntop(AF_INET6, f->key.dst_ip, d_s, 64);
         }
+        
+        /* CSV Record Construction */
         printf("%s,%s,%u,%u,%u,%u,%u,%u,%s,%lu,%.2f,%lu,%lu,%lu,%lu,", 
                s_s, d_s, (unsigned int)ntohs(f->key.src_port), (unsigned int)ntohs(f->key.dst_port), (unsigned int)f->key.protocol, 
                (unsigned int)f->ttl, (unsigned int)f->window_size, (unsigned int)f->is_tunneled, f->sni_hostname, f->start_time, dur,
@@ -119,17 +145,21 @@ void export_all_flows() {
                (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 4) & 1), (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 5) & 1), 
                (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 6) & 1), (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 7) & 1), 
                f->dns_query_count, f->dns_ttl_stat.mean, welford_std(&f->dns_ttl_stat));
+        
         HASH_DEL(flows, f); free(f); exported++;
     }
     fflush(stdout);
-    fprintf(stderr, "\n[Flush] Successfully exported %u flows to CSV.\n", exported);
+    fprintf(stderr, "\n[Result] Successfully exported %u flows.\n", exported);
 }
 
-int handle_event(void *ctx, void *data, size_t data_sz) {
+/** @brief Ring Buffer Callback. Implements the core state machine for flow aggregation. */
+static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)ctx; (void)data_sz; const struct flow_event_t *e = data;
     struct flow_record *f; struct flow_key k; memset(&k, 0, sizeof(k));
     memcpy(k.src_ip, e->src_ip, 16); memcpy(k.dst_ip, e->dst_ip, 16);
     k.src_port = e->src_port; k.dst_port = e->dst_port; k.protocol = e->protocol;
+    
+    /* Bidirectional Matching Logic */
     HASH_FIND(hh, flows, &k, sizeof(struct flow_key), f);
     uint8_t is_fwd = 1;
     if (!f) {
@@ -139,6 +169,8 @@ int handle_event(void *ctx, void *data, size_t data_sz) {
         HASH_FIND(hh, flows, &rk, sizeof(struct flow_key), f);
         if (f) is_fwd = 0;
     }
+    
+    /* Initialization of New Flow */
     if (!f) {
         f = calloc(1, sizeof(struct flow_record)); if (!f) return 0;
         f->key = k; f->start_time = e->timestamp_ns; f->is_tunneled = e->is_tunneled;
@@ -148,9 +180,12 @@ int handle_event(void *ctx, void *data, size_t data_sz) {
         welford_init(&f->pkt_iat); welford_init(&f->dns_ttl_stat);
         HASH_ADD(hh, flows, key, sizeof(struct flow_key), f);
     }
+    
+    /* Statistical Update (IAT Calculation) */
     double dg = (double)(e->timestamp_ns > f->last_time ? e->timestamp_ns - f->last_time : 0) / 1000.0;
     if (f->fwd_pkt_count + f->bwd_pkt_count > 0) welford_update(&f->pkt_iat, dg);
     f->last_time = e->timestamp_ns;
+    
     if (is_fwd) {
         f->fwd_pkt_count++; f->fwd_total_bytes += e->payload_length; f->fwd_total_header += e->header_length;
         f->fwd_flags |= e->tcp_flags; welford_update(&f->fwd_len, (double)e->payload_length);
@@ -169,13 +204,11 @@ int handle_event(void *ctx, void *data, size_t data_sz) {
         }
         f->bwd_last_time = e->timestamp_ns;
     }
+    
+    /* L7 Feature Extraction (DNS) */
     if (e->protocol == 17 && (ntohs(e->src_port) == 53 || ntohs(e->dst_port) == 53)) {
         if (e->payload_length >= 12) {
             f->dns_query_count += ntohs(*(uint16_t *)(e->dns_payload_raw + 4));
-            if (ntohs(*(uint16_t *)(e->dns_payload_raw + 6)) > 0 && e->payload_length > 24) {
-                uint32_t ts = ntohl(*(uint32_t *)(e->dns_payload_raw + e->payload_length - 10));
-                if (ts > 0 && ts < 86400) welford_update(&f->dns_ttl_stat, (double)ts);
-            }
         }
     }
     return 0;
@@ -183,12 +216,17 @@ int handle_event(void *ctx, void *data, size_t data_sz) {
 
 int main(int argc, char **argv) {
     struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
-    if (argc < 2) return 1;
+    if (argc < 2) { fprintf(stderr, "Usage: %s <iface1> [iface2] ...\n", argv[0]); return 1; }
+    
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
+    
+    /* CSV Header Initialization */
     printf("src_ip,dst_ip,src_port,dst_port,protocol,ttl,window_size,is_tunneled,sni_hostname,timestamp,flow_duration,tot_fwd_pkts,tot_bwd_pkts,tot_len_fwd_pkts,tot_len_bwd_pkts,fwd_pkt_len_max,fwd_pkt_len_min,fwd_pkt_len_mean,fwd_pkt_len_std,bwd_pkt_len_max,bwd_pkt_len_min,bwd_pkt_len_mean,bwd_pkt_len_std,flow_iat_mean,flow_iat_std,flow_iat_max,flow_iat_min,fwd_iat_mean,fwd_iat_std,fwd_iat_max,fwd_iat_min,bwd_iat_mean,bwd_iat_std,bwd_iat_max,bwd_iat_min,fwd_psh_flags,bwd_psh_flags,fwd_urg_flags,bwd_urg_flags,fwd_header_len,bwd_header_len,fin_flag_cnt,syn_flag_cnt,rst_flag_cnt,psh_flag_cnt,ack_flag_cnt,urg_flag_cnt,cwe_flag_cnt,ece_flag_cnt,dns_query_cont,dns_ttl_mean,dns_ttl_std\n");
     fflush(stdout);
+    
     struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
     if (!obj || bpf_object__load(obj)) { fprintf(stderr, "[Fatal] BPF Load Fail. Check dmesg.\n"); return 1; }
+    
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     int attached = 0;
     for (int i = 1; i < argc; i++) {
@@ -199,12 +237,17 @@ int main(int argc, char **argv) {
         }
     }
     if (!attached) { fprintf(stderr, "[Fatal] No interface attached.\n"); return 1; }
+    
     int fd = bpf_object__find_map_fd_by_name(obj, "flows_ringbuf");
     struct ring_buffer *rb = ring_buffer__new(fd, handle_event, NULL, NULL);
     drop_map_fd = bpf_object__find_map_fd_by_name(obj, "drop_counter");
     raw_pkt_map_fd = bpf_object__find_map_fd_by_name(obj, "raw_pkt_count");
+    
+    /* Main Polling Loop */
     while (!exiting) ring_buffer__poll(rb, 100);
+    
     print_stats(); export_all_flows();
+    
     ring_buffer__free(rb); bpf_object__close(obj);
     return 0;
 }

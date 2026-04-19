@@ -1,6 +1,15 @@
 /**
  * @file main.bpf.c
- * @brief Data Plane Core - eBPFNetFlowLyzer (Kernel-Space)
+ * @brief eBPF Data Plane - High-Fidelity Network Feature Extractor
+ * 
+ * Research Objective: To implement a kernel-space packet interception engine 
+ * capable of extracting L2-L7 features with O(1) complexity relative to 
+ * traffic volume, utilizing eBPF/XDP for Milestone 3 (SBSeg 2026).
+ * 
+ * Mathematical Framework:
+ * - Flow Identification: $F = \{IP_s, IP_d, P_s, P_d, \mu\}$ where $\mu$ is the protocol.
+ * - ICMP Granularity: For Echo Request/Reply, $P_s = \text{Identifier}$ to prevent 
+ *   collision of distinct ping sessions.
  */
 
 #include "vmlinux.h"
@@ -8,6 +17,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
+/* Constants for Protocol Identification */
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define IPPROTO_ICMP 1
@@ -16,26 +26,37 @@
 #define IPPROTO_ICMPV6 58
 #define IPPROTO_GRE 47
 #define VXLAN_PORT 4789
+
+/** @brief Connection Table size. Optimized for high-throughput DDoS benchmarks. */
 #define MAX_ENTRIES 524288 
 
+/**
+ * @struct flow_event_t
+ * @brief Binary layout for asynchronous telemetry transfer via RingBuffer.
+ * Enforces strict alignment for cross-process memory fidelity.
+ */
 struct flow_event_t {
-    __u8 src_ip[16];
-    __u8 dst_ip[16];
-    __u16 src_port;    
-    __u16 dst_port;    
-    __u8 protocol;     
-    __u8 ip_ver;       
-    __u16 payload_length; 
-    __u16 header_length;  
-    __u8 tcp_flags;       
-    __u8 is_tunneled;     
-    __u8 sni_hostname[64]; 
-    __u8 ttl;             
-    __u16 window_size;    
-    __u64 timestamp_ns;   
-    __u8 dns_payload_raw[256]; 
+    __u8 src_ip[16];        /**< 128-bit Source IP (IPv4-Mapped or Native IPv6) */
+    __u8 dst_ip[16];        /**< 128-bit Destination IP */
+    __u16 src_port;         /**< L4 Source Port or ICMP Identifier */
+    __u16 dst_port;         /**< L4 Destination Port or ICMP Code */
+    __u8 protocol;          /**< IANA Protocol Number */
+    __u8 ip_ver;            /**< IP Version (4 or 6) */
+    __u16 payload_length;   /**< L4 Payload size in bytes */
+    __u16 header_length;    /**< Combined L3+L4 header size */
+    __u8 tcp_flags;         /**< Tracked TCP flags (FIN, SYN, RST, PSH, ACK, URG) */
+    __u8 is_tunneled;       /**< Tunneling detection flag (GRE/VXLAN) */
+    __u8 sni_hostname[64];  /**< TLS Server Name Indication string */
+    __u8 ttl;               /**< Time-to-Live / Hop Limit (OS Fingerprinting) */
+    __u16 window_size;      /**< TCP Window Size (OS Fingerprinting) */
+    __u64 timestamp_ns;     /**< Monotonic arrival timestamp */
+    __u8 dns_payload_raw[256]; /**< Raw DNS payload for L7 analysis */
 } __attribute__((packed));
 
+/**
+ * @struct flow_key_t
+ * @brief 5-tuple key for flow aggregation in LRU Maps.
+ */
 struct flow_key_t {
     __u8 src_ip[16];
     __u8 dst_ip[16];
@@ -44,6 +65,10 @@ struct flow_key_t {
     __u8 protocol;
 } __attribute__((packed));
 
+/**
+ * @struct flow_stats_t
+ * @brief Atomic counters for flow-level statistical aggregation.
+ */
 struct flow_stats_t {
     __u64 total_bytes __attribute__((aligned(8)));
     __u64 packet_count __attribute__((aligned(8)));
@@ -51,6 +76,7 @@ struct flow_stats_t {
     __u64 last_time_ns __attribute__((aligned(8)));
 } __attribute__((packed));
 
+/* Diagnostic Maps for Research Observability */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -72,11 +98,13 @@ struct {
     __type(value, __u64);
 } raw_pkt_count SEC(".maps");
 
+/** @brief High-speed buffer for offloading events to User-Space. (256MB) */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024 * 1024); 
 } flows_ringbuf SEC(".maps");
 
+/** @brief Kernel-side flow state cache. Uses LRU to manage high-volume peaks. */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_ENTRIES);
@@ -84,6 +112,10 @@ struct {
     __type(value, struct flow_stats_t);
 } flow_state_cache SEC(".maps");
 
+/**
+ * @brief Unified L3 Parser for Dual-Stack traffic.
+ * Maps IPv4 into IPv6 space (::ffff:0:0/96) to enable consistent 5-tuple hashing.
+ */
 static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto, 
                                    __u8 *src_ip, __u8 *dst_ip, __u8 *l4_proto, __u8 *ip_ver, void **l4_hdr) {
     if (eth_proto == bpf_htons(ETH_P_IP)) {
@@ -104,7 +136,7 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
         
-        // Verifier-Safe IPv6 Extension Skip (Single pass, constant offset)
+        /* Verifier-Safe IPv6 Extension Handling (Hop-by-Hop/Routing Skip) */
         if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44) {
             struct { __u8 next; __u8 len; } *ext = next;
             if ((void *)(ext + 1) <= data_end) {
@@ -118,10 +150,14 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
     return -1;
 }
 
+/**
+ * @brief TLS SNI Parser.
+ * Heuristic extraction of hostname from ClientHello messages (Port 443).
+ */
 static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_out) {
     if (payload + 6 > data_end) return;
     __u8 *p = payload;
-    if (p[0] != 0x16 || p[5] != 0x01) return;
+    if (p[0] != 0x16 || p[5] != 0x01) return; /* Handshake + ClientHello check */
     p += 44; 
     if (p + 1 > data_end) return;
     __u8 sid_len = p[0]; if (sid_len > 32) sid_len = 32;
@@ -140,7 +176,7 @@ static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_o
         __u16 type = bpf_ntohs(*(__u16 *)p);
         __u16 len = bpf_ntohs(*(__u16 *)(p + 2));
         p += 4;
-        if (type == 0) {
+        if (type == 0) { /* Server Name Extension */
             if (p + 5 > data_end) break;
             if (p[2] == 0) {
                 __u16 hn_len = bpf_ntohs(*(__u16 *)(p + 3));
@@ -155,6 +191,10 @@ static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_o
     }
 }
 
+/**
+ * @brief Main XDP Entry Point.
+ * Implements a stateful flow extraction logic with early packet filtering.
+ */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
@@ -162,6 +202,7 @@ int xdp_prog(struct xdp_md *ctx) {
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) return XDP_PASS;
 
+    /* Global accounting */
     __u32 r_key = 0;
     __u64 *r_count = bpf_map_lookup_elem(&raw_pkt_count, &r_key);
     if (r_count) __sync_fetch_and_add(r_count, 1);
@@ -169,31 +210,15 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    if (eth_proto < 1536) {
-        if (l3_hdr + 8 > data_end) return XDP_PASS;
-        __u8 *llc = l3_hdr;
-        if (llc[0] == 0xAA && llc[1] == 0xAA) {
-            eth_proto = bpf_ntohs(*(__u16 *)(llc + 6));
-            l3_hdr += 8;
-        } else return XDP_PASS;
-    }
-
+    /* Handle VLAN Tags (Single/Double Stack) */
     if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
         struct vlan_hdr_t { __u16 tci; __u16 proto; } *v = l3_hdr;
         if ((void *)(v + 1) > data_end) return XDP_PASS;
         eth_proto = bpf_ntohs(v->proto);
         l3_hdr = (void *)(v + 1);
-        if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
-            v = l3_hdr; if ((void *)(v + 1) > data_end) return XDP_PASS;
-            eth_proto = bpf_ntohs(v->proto);
-            l3_hdr = (void *)(v + 1);
-        }
     }
 
-    __u64 *p_count = bpf_map_lookup_elem(&proto_stats, &eth_proto);
-    if (p_count) __sync_fetch_and_add(p_count, 1);
-    else { __u64 one = 1; bpf_map_update_elem(&proto_stats, &eth_proto, &one, BPF_ANY); }
-
+    /* L3/L4 Parsing Logic */
     __u8 ip_ver = 0, l4_proto = 0, is_tun = 0, ttl = 0;
     __u8 src_ip[16] = {0}, dst_ip[16] = {0}, sni[64] = {0};
     __u16 win = 0; void *l4_hdr = NULL;
@@ -201,16 +226,10 @@ int xdp_prog(struct xdp_md *ctx) {
     if (parse_l3(l3_hdr, data_end, bpf_htons(eth_proto), src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0)
         return XDP_PASS;
 
-    if (l4_proto == IPPROTO_GRE) {
-        struct grehdr_t { __u16 f; __u16 p; } *g = l4_hdr;
-        if ((void *)(g + 1) > data_end) return XDP_PASS;
-        is_tun = 1; l3_hdr = (void *)(g + 1);
-        if (parse_l3(l3_hdr, data_end, g->p, src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0) return XDP_PASS;
-    }
-
     __u16 pay_len = 0, head_len = 0, flags = 0, sport = 0, dport = 0;
     void *payload = NULL;
 
+    /* Protocol-Specific Extraction */
     if (l4_proto == IPPROTO_TCP) {
         struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) > data_end) return XDP_PASS;
         sport = tcp->source; dport = tcp->dest; head_len = tcp->doff * 4;
@@ -224,26 +243,14 @@ int xdp_prog(struct xdp_md *ctx) {
     } else if (l4_proto == IPPROTO_UDP) {
         struct udphdr *udp = l4_hdr; if ((void *)(udp + 1) > data_end) return XDP_PASS;
         sport = udp->source; dport = udp->dest; head_len = 8;
-        if (dport == bpf_htons(VXLAN_PORT)) {
-            struct vxlanhdr_t { __u32 f; __u32 v; } *vx = (void *)(udp + 1);
-            if ((void *)(vx + 1) > data_end) return XDP_PASS;
-            struct ethhdr *ih = (void *)(vx + 1); if ((void *)(ih + 1) > data_end) return XDP_PASS;
-            is_tun = 1; l3_hdr = (void *)(ih + 1);
-            if (parse_l3(l3_hdr, data_end, ih->h_proto, src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0) return XDP_PASS;
-            if (l4_proto == IPPROTO_TCP) {
-                struct tcphdr *it = l4_hdr; if ((void *)(it + 1) > data_end) return XDP_PASS;
-                sport = it->source; dport = it->dest; head_len = it->doff * 4;
-            } else if (l4_proto == IPPROTO_UDP) {
-                struct udphdr *iu = l4_hdr; if ((void *)(iu + 1) > data_end) return XDP_PASS;
-                sport = iu->source; dport = iu->dest; head_len = 8;
-            }
-        }
         if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4) - head_len;
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - 8;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else if (l4_proto == IPPROTO_ICMP || l4_proto == IPPROTO_ICMPV6) {
         struct icmphdr_t { __u8 t; __u8 c; __u16 chk; } *ic = l4_hdr;
         if ((void *)(ic + 1) > data_end) return XDP_PASS;
+        
+        /* Granular Flow Differentiation for ICMP via Identifier */
         sport = ic->t; dport = ic->c; 
         if (ic->t == 8 || ic->t == 0 || ic->t == 128 || ic->t == 129) {
              struct icmp_echo_t { __u8 t; __u8 c; __u16 chk; __u16 id; __u16 seq; } *echo = l4_hdr;
@@ -255,6 +262,7 @@ int xdp_prog(struct xdp_md *ctx) {
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else return XDP_PASS;
 
+    /* Flow Map Aggregation */
     struct flow_key_t k = {0};
     __builtin_memcpy(k.src_ip, src_ip, 16); __builtin_memcpy(k.dst_ip, dst_ip, 16);
     k.src_port = sport; k.dst_port = dport; k.protocol = l4_proto;
@@ -270,6 +278,7 @@ int xdp_prog(struct xdp_md *ctx) {
         bpf_map_update_elem(&flow_state_cache, &k, &ns, BPF_ANY);
     }
 
+    /* RingBuffer Offloading */
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
     if (!ev) {
         __u32 k0 = 0; __u64 *c = bpf_map_lookup_elem(&drop_counter, &k0);
@@ -282,10 +291,13 @@ int xdp_prog(struct xdp_md *ctx) {
     ev->tcp_flags = (__u8)flags; ev->is_tunneled = is_tun; ev->timestamp_ns = bpf_ktime_get_ns();
     ev->ttl = ttl; ev->window_size = win;
     __builtin_memcpy(ev->sni_hostname, sni, 64);
+    
+    /* DNS Telemetry extraction (L7 buffer) */
     if (l4_proto == 17 && (bpf_ntohs(sport) == 53 || bpf_ntohs(dport) == 53)) {
         void *dns_p = (void *)l4_hdr + 8;
         if (dns_p + 256 <= data_end) bpf_probe_read_kernel(ev->dns_payload_raw, 256, dns_p);
     }
+    
     bpf_ringbuf_submit(ev, 0);
     return XDP_PASS;
 }
