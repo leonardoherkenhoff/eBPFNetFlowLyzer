@@ -1,5 +1,0 @@
-\babel@toc {brazil}{}\relax 
-\beamer@sectionintoc {1}{1. Problema de Pesquisa}{3}{0}{1}
-\beamer@sectionintoc {2}{2. Trabalhos Relacionados e Lacuna Cinetífica}{6}{0}{2}
-\beamer@sectionintoc {3}{3. Arquitetura Proposta: eBPFNetFlowLyzer}{8}{0}{3}
-\beamer@sectionintoc {4}{4. Metodologia e Conclusão}{10}{0}{4}

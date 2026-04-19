@@ -1,5 +1,5 @@
 """
-Hardware Resource Monitor for eBPFNetFlowLyzer
+Hardware Resource Monitor for Lynceus
 ----------------------------------------------
 This script performs high-frequency sampling of CPU and Memory (RAM) utilization
 during the network feature extraction benchmarks.
@@ -150,7 +150,7 @@ def monitor_process(pid, output_csv, interval=1.0):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="eBPFNetFlowLyzer Resource Monitor")
+    parser = argparse.ArgumentParser(description="Lynceus Resource Monitor")
     parser.add_argument("pid", type=int, help="Target PID (C-daemon)")
     parser.add_argument("output", type=str, help="Output CSV path")
     parser.add_argument("--interval", type=float, default=1.0, help="Sampling interval (sec)")

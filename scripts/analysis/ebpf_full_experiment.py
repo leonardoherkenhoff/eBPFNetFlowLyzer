@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-eBPFNetFlowLyzer - Full Research Pipeline Orchestrator (v1.9.13)
-------------------------------------------------------
+Lynceus Research Pipeline - Full Experiment Orchestrator (v1.0)
+-----------------------------------------------------------
+v1.0 Stable Research Milestone:
+- Engine: Lynceus v2.0 (Massively Parallel eBPF Extractor).
+- "Extract-Label-Purge" Strategy: Complete cycle for massive datasets.
+
 Research Objective:
 This script executes the complete end-to-end research experiment, from 
 source compilation to Machine Learning validation.

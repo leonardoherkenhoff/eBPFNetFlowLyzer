@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-ebpf_labeler.py - Research Post-Processing - Deterministic Ground Truth Attribution (v1.9.13).
-------------------------------------------------------------------------------------------
-v1.9.13 Enhancements:
-- Iterative Storage Orchestration: CLI arguments for batch-specific processing.
-- Multi-Worker Aggregation: Handles partitioned worker CSVs (v1.9.11) natively.
+ebpf_labeler.py - Lynceus Research Pipeline - Dataset Labeling Utility (v1.0)
+---------------------------------------------------------------------------
+v1.0 Stable Research Milestone:
+- Context: Post-extraction labeling for Lynceus telemetry.
+- Feature: Atomic category-based labeling and recursive discovery.
+- Multi-Worker Aggregation: Handles partitioned worker CSVs natively.
 - Automated Data Purge: Post-labeling cleanup to maintain partition integrity.
 """
 

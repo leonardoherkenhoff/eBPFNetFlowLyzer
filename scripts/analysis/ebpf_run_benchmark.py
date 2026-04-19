@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-ebpf_run_benchmark.py - Research-Grade ML Validation Script (v3.1.0).
--------------------------------------------------------------------
-v3.1.0 Enhancements:
-- Hierarchical Discovery: Recursive search for labeled datasets in subdirectories.
+ebpf_run_benchmark.py - Lynceus Research Pipeline - ML Benchmark Suite (v3.1.0).
+------------------------------------------------------
+v3.1.0 Stable Research Milestone:
+- Validation: High-fidelity F1-Score benchmarking for Lynceus features.
+- Context: Post-labeling analysis and feature importance estimation.
 - Dynamic Labeling Logic: Correctly identifies attack categories vs 'BENIGN'.
 - Memory Optimization: Chunked loading for multi-gigabyte research datasets.
 """

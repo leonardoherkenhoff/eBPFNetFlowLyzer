@@ -1,7 +1,8 @@
-# Makefile - eBPFNetFlowLyzer (High-Resolution Research Suite)
+# Makefile - Lynceus v2.0
+# Description: Massively Parallel eBPF Flow Extraction Engine
 # -----------------------------------------------------------------------------
 # Research Objective: Stateless Packet-Level Network Feature Extraction.
-# This Makefile orchestrates the compilation of the v1.5.0 pipeline, 
+# This Makefile orchestrates the compilation of the v2.0 pipeline, 
 # supporting high-entropy telemetry for academic DDoS benchmarks.
 #
 # Requirements:
