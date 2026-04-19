@@ -133,7 +133,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
            s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes, s->b_bytes);
 
     /* 2. Advanced Moments (Payload) */
-    printf("%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,",
+    printf("%.2f,%.2f,%.2f,%.2f,%u,%.2f,%.2f,%.2f,%.2f,%u,%.2f,%.2f,%.2f,%.2f,%u,",
            s->t_pay.M1, sqrt(s->t_pay.M2/(s->t_pay.n?s->t_pay.n:1)), w_skew(&s->t_pay), w_kurt(&s->t_pay), s->t_pay.max,
            s->f_pay.M1, sqrt(s->f_pay.M2/(s->f_pay.n?s->f_pay.n:1)), w_skew(&s->f_pay), w_kurt(&s->f_pay), s->f_pay.max,
            s->b_pay.M1, sqrt(s->b_pay.M2/(s->b_pay.n?s->b_pay.n:1)), w_skew(&s->b_pay), w_kurt(&s->b_pay), s->b_pay.max);
