@@ -176,7 +176,7 @@ void *worker_fn(void *arg) {
 
         s_off += snprintf(s_buf + s_off, 4096, "%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", sip, dip, ntohs(e.key.src_port), ntohs(e.key.dst_port), e.key.protocol, sip, ntohs(e.key.src_port), dip, ntohs(e.key.dst_port), e.key.protocol, (double)s->meta.start_time / 1e9, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
         
-        #define FMT_W(W) s_off += snprintf(s_buf + s_off, 4096, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), W.mode)
+        #define FMT_W(W) s_off += snprintf(s_buf + s_off, 4096, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), w_mode(&W))
         FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr);
         FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->t_d_pay); FMT_W(s->f_d_pay); FMT_W(s->b_d_pay);
         for(int i=0; i<8; i++) s_off += snprintf(s_buf + s_off, 4096, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
