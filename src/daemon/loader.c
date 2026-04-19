@@ -301,7 +301,10 @@ int main(int argc, char **argv) {
         workers[i].id = i; 
         workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         if (workers[i].rb_fd < 0) { fprintf(stderr, "❌ Failed to create RingBuffer for core %d (Libbpf 1.2+ required)\n", i); return 1; }
-        bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
+        if (bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY) < 0) {
+            fprintf(stderr, "❌ Failed to update RingBuffer map for core %d: %s\n", i, strerror(errno));
+            return 1;
+        }
     }
     fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scientific 399 Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
