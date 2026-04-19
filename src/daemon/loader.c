@@ -1,21 +1,21 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.13).
+ * @brief User-Space Control Plane - Milestone 1: Stable Parallel Extractor (v1.0).
  * 
  * @details 
  * Orquestrador de telemetria massivamente paralelo com arquitetura Partitioned I/O.
  * Esta versão elimina o Mutex de escrita global, permitindo que cada core de CPU
- * atue como um extrator autônomo e independente, maximizando a vazão do Xeon.
+ * atue como um extrator autônomo e independente, maximizando a vazão do host.
  * 
- * Formalismo de Engenharia (v1.9.13):
+ * Formalismo de Engenharia (v1.0):
  * 1. Zero-Contention I/O: Cada Worker $W_i$ possui seu próprio file descriptor
  *    e buffer de 2MB, eliminando locks de sistema de arquivos e contenção de mutex.
  * 2. Isolamento de Caminhos: Utiliza 'worker_telemetry/' para evitar colisões
  *    com a árvore de dados do projeto.
  * 3. Integridade Total: Acumuladores de eventos por core garantem a rastreabilidade
- *    de perda zero exigida para o treinamento de modelos de ML em DDoS.
+ *    de perda zero exigida para o treinamento de modelos de ML.
  * 
- * @version 1.9.13 (High-Fidelity / Partitioned I/O / Final Run)
+ * @version 1.0 (Stable / Partitioned I/O / Milestone 1)
  */
 
 #define _GNU_SOURCE
@@ -241,7 +241,7 @@ int main(int argc, char **argv) {
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
 
-    fprintf(stderr, "🚀 [Control Plane] %d Workers Ativos (v1.9.13 Partitioned I/O Mode)\n", num_workers);
+    fprintf(stderr, "🚀 [Control Plane] %d Workers Ativos (v1.0 Partitioned I/O Mode)\n", num_workers);
 
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
 

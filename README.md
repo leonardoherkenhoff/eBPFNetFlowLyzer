@@ -1,4 +1,4 @@
-# 🛡️ eBPFNetFlowLyzer v1.9.13
+# 🛡️ eBPFNetFlowLyzer v1.0
 
 **High-Performance Parallel Network Telemetry & Massive Dataset Orchestration.**
 
@@ -8,7 +8,7 @@
 
 **eBPFNetFlowLyzer** is a state-of-the-art network traffic feature extractor engineered for **Dynamic N-Core environments** and high-fidelity security research. By leveraging a **Massively Parallel Shared-Nothing Architecture**, it achieves linear scalability on multi-socket NUMA systems, making it the definitive tool for building real-time autonomous systems (**MAPE-K Loops**).
 
-The system automatically probes the host hardware at runtime, instantiating independent extraction pipelines for every available CPU core. This ensures **Absolute Capture Integrity** (zero-loss) even under multi-gigabit DDoS volumetric conditions and large-scale dataset extraction (180GB+).
+The system automatically probes the host hardware at runtime, instantiating independent extraction pipelines for every available CPU core. This ensures **Absolute Capture Integrity** (zero-loss) even under high-load volumetric conditions and large-scale dataset extraction.
 
 ---
 
@@ -16,7 +16,7 @@ The system automatically probes the host hardware at runtime, instantiating inde
 
 *   **Elastic N-Core Scalability**: Automatically detects system topology via `sysconf` and instantiates a dynamic **Map-in-Map (BPF_MAP_TYPE_ARRAY_OF_MAPS)** structure, providing private telemetry channels per core.
 *   **Zero-Contention Partitioned I/O**: High-performance multi-threaded output engine where each core writes to its own isolated telemetry stream, bypassing global filesystem locks and mutex contention.
-*   **Iterative Storage Orchestration (v1.9.12+)**: Implements a rigorous **"Extract-Label-Purge"** pipeline. Telemetry is labeled and source-purged batch-by-batch, allowing 180GB+ datasets to be processed on constrained storage partitions.
+*   **Iterative Storage Orchestration**: Implements a rigorous **"Extract-Label-Purge"** pipeline. Telemetry is labeled and source-purged batch-by-batch, allowing massive datasets to be processed on constrained storage partitions.
 *   **Scientific Statistical Suite (400+ Features)**: Numerically stable $O(1)$ calculation of 4th-order moments using Welford's Algorithm.
 *   **NUMA-Aware Orchestration**: Real-time CPU affinity pinning (`pthread_setaffinity_np`) to maximize cache locality and minimize cross-socket latency.
 *   **Full IPv6 & VLAN Support**: Transparent dissection of encapsulated and multi-stack traffic without performance degradation.
@@ -80,12 +80,12 @@ make clean && make all
 sudo python3 scripts/analysis/ebpf_full_experiment.py
 ```
 
-### 📉 Testbed Case Study (Xeon Silver 4410Y - 48 Cores)
-- **Ingestion Fidelity**: 100% (33M+ packets tested with zero drops).
-- **Storage Resilience**: Successfully processed 180GB CICDDoS2019 dataset using iterative cleanup.
-- **Architecture Adaptability**: The system dynamically scaled to all 48 threads without manual configuration.
-- **Memory Footprint**: ~3GB for 200k active flows.
-- **I/O Throughput**: 2.5GB/s+ (sustained partitioned writing).
+### 📉 Performance Metrics (Scale-Out Validation)
+- **Ingestion Fidelity**: 100% capture integrity with zero packet drops under sustained load.
+- **Storage Resilience**: Iterative cleanup enables processing of massive PCAP volumes without partition overflow.
+- **Architecture Adaptability**: The system dynamically scales to all available hardware threads without manual configuration.
+- **Memory Efficiency**: Low footprint via kernel-space aggregation and ringbuffer polling.
+- **I/O Throughput**: Sustained high-velocity partitioned writing.
 
 ---
 

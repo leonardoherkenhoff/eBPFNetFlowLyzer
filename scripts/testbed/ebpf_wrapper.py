@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.13)
+eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.0)
 -----------------------------------------------------------
-v1.9.13 Iterative Storage Management:
+v1.0 Stable Research Milestone:
 - "Extract-Label-Purge" Strategy: Integrates labelling and cleanup into the loop.
-- Post-Extraction Flush Resilience: Increased timeout for 48-core buffer flushing.
-- Ensures the 180GB benchmark fits in the 586GB partition.
+- Post-Extraction Flush Resilience: Optimized timeout for multi-core buffer flushing.
+- Ensures massive dataset benchmarks fit in production storage partitions.
 """
 
 import subprocess
@@ -156,7 +156,7 @@ def process_pcap_dir(pcap_dir, category):
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.13 Iterative) ===")
+    print("=== eBPFNetFlowLyzer Research Pipeline (v1.0 Iterative) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return
