@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ebpf_labeler.py - Research Post-Processing - Topological Ground Truth Attribution (v1.9.13).
+ebpf_labeler.py - Research Post-Processing - Deterministic Ground Truth Attribution (v1.9.13).
 ------------------------------------------------------------------------------------------
 v1.9.13 Enhancements:
-- Target-Specific Labeling: CLI arguments for iterative category processing.
-- Multi-Worker Support: Handles partitioned worker CSVs (v1.9.11) natively.
-- Automatic Deletion: Supports post-labeling cleanup to preserve disk space.
+- Iterative Storage Orchestration: CLI arguments for batch-specific processing.
+- Multi-Worker Aggregation: Handles partitioned worker CSVs (v1.9.11) natively.
+- Automated Data Purge: Post-labeling cleanup to maintain partition integrity.
 """
 
 import pandas as pd
@@ -72,7 +72,7 @@ def main():
     parser.add_argument("--cleanup", action="store_true", help="Delete interim files after labeling")
     args = parser.parse_args()
 
-    print("=== eBPFNetFlowLyzer Research Pre-processing (Labeling) ===")
+    print("=== eBPFNetFlowLyzer Research Pre-processing (Ground Truth Attribution) ===")
     
     if args.path:
         target_dir = os.path.abspath(args.path)

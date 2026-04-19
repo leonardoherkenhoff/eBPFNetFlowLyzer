@@ -241,7 +241,7 @@ int main(int argc, char **argv) {
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
 
-    fprintf(stderr, "🚀 [Control Plane] %d Workers Ativos (Partitioned I/O Mode)\n", num_workers);
+    fprintf(stderr, "🚀 [Control Plane] %d Workers Ativos (v1.9.13 Partitioned I/O Mode)\n", num_workers);
 
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
 

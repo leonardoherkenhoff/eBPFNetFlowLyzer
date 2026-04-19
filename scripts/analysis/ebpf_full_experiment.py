@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-eBPFNetFlowLyzer - Full Research Pipeline Orchestrator
+eBPFNetFlowLyzer - Full Research Pipeline Orchestrator (v1.9.13)
 ------------------------------------------------------
 Research Objective:
 This script executes the complete end-to-end research experiment, from 
-source compilation to Machine Learning validation (v1.5.0).
+source compilation to Machine Learning validation.
 
 Pipeline Phases:
 1. Build Phase: Compiles the BPF bytecode and User-space daemon.

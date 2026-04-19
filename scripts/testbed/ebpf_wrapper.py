@@ -156,7 +156,7 @@ def process_pcap_dir(pcap_dir, category):
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.12 Iterative) ===")
+    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.13 Iterative) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return
