@@ -1,37 +1,36 @@
 # 🗺️ Lynceus Project Roadmap
 
-Este documento define a trajetória estratégica do motor **Lynceus**, evoluindo de um extrator de alta fidelidade para uma infraestrutura de segurança autônoma.
+Este documento define a trajetória técnica do **Lynceus**, focado exclusivamente na evolução como motor de extração de características (Features) em fluxo de rede.
 
 ---
 
 ## ✅ Fase 1: Extração de Alta Performance (Concluída)
-*Objetivo: Integridade de Pesquisa e Vazão Wire-Speed.*
+*Objetivo: Integridade Estatística e Vazão de Extração.*
 
-- [x] **Arquitetura Shared-Nothing**: Escalabilidade N-Core linear via isolamento de memória por CPU.
-- [x] **Persistência Particionada**: Escrita em CSV sem contenção de lock global.
-- [x] **Matriz de 399 Características**: Paridade total (NTL+AL) com 192 bins de histograma.
-- [x] **Fidelidade Estatística**: Algoritmo de Welford para momentos de 4ª ordem ($O(1)$).
-- [x] **Visibilidade Protocolar Universal**: Suporte a IPv4/v6, TCP, UDP, ICMP-ID, SCTP, IGMP e decapsulamento de túneis (GRE/VXLAN) e QinQ.
-- [x] **Identidade Profissional**: Consolidação da marca Lynceus para a comunidade.
-
----
-
-## 🚀 Fase 2: Inteligência e Observabilidade Avançada
-*Objetivo: Engenharia de Características Complexas.*
-
-- [ ] **Dissecção L7 Profunda**: Suporte nativo eBPF para fingerprinting de **HTTP/2** e **QUIC**.
-- [ ] **Análise de Drift de Entropia**: Monitoramento temporal da Entropia de Shannon para detecção de anomalias em tráfego criptografado.
-- [ ] **Gestão de Estado Distribuída**: Rastreamento de transições de protocolo complexas (ex: Handshakes) em ambiente multi-core.
-- [ ] **Exportação Agnóstica**: Integração com **Prometheus/Grafana** via exportador customizado de baixa latência.
+- [x] **Arquitetura Shared-Nothing**: Isolamento N-Core para extração linear sem contenção.
+- [x] **Matriz Científica (399 Features)**: Unificação NTLFlowLyzer + ALFlowLyzer (não-redundante).
+- [x] **Fidelidade de 4ª Ordem**: Implementação de Welford para momentos estatísticos em $O(1)$.
+- [x] **Universalidade Protocolar**: Extração em IPv4/v6, TCP, UDP, ICMP-ID, GRE, VXLAN e QinQ.
+- [x] **Granularidade Segmentada**: Flush de características a cada 100 pacotes (N=100).
 
 ---
 
-## 🧠 Fase 3: Resposta Autônoma (MAPE-K)
-*Objetivo: O Loop Fechado de Mitigação.*
+## 🚀 Fase 2: Engenharia de Características Complexas
+*Objetivo: Expansão da Densidade de Dados para ML.*
 
-- [ ] **Inferência ML no Kernel**: Execução de modelos quantizados (via XDP Tail-Calls) para classificação em tempo real.
-- [ ] **Mitigação Dinâmica**: Ações automatizadas de `XDP_DROP` ou `XDP_REDIRECT` baseadas em níveis de confiança estatística.
-- [ ] **Feedback Loop**: Orquestração MAPE-K em user-space para ajuste dinâmico de limiares de detecção.
+- [ ] **Fingerprinting L7 Nativo**: Extração de características específicas de **HTTP/2** e **QUIC** (ex: Priority Frames, Stream IDs) para detecção de anomalias em tráfego criptografado.
+- [ ] **Análise de Drift Temporal**: Cálculo da evolução da entropia e dos momentos estatísticos entre segmentos consecutivos do mesmo fluxo.
+- [ ] **Extração de Estados de Protocolo**: Geração de features baseadas em transições (ex: latência de handshake, variação de janela TCP, taxas de retransmissão).
+- [ ] **Exportação de Alta Velocidade para Pipelines ML**: Implementação de backend de exportação otimizado (ex: ZMQ ou buffers binários) para ingestão direta por frameworks de Deep Learning.
 
 ---
-**Lynceus: Visão Precisa, Integridade Absoluta.**
+
+## 🧠 Fase 3: Extração Híbrida e Resposta (MAPE-K)
+*Objetivo: Otimização da Extração via Inferência.*
+
+- [ ] **Seleção de Características no Kernel**: Uso de modelos de ML quantizados (XDP) para filtrar e exportar apenas as características de maior relevância para a detecção detectada.
+- [ ] **Mitigação Baseada em Features**: Ações de drop/redirect acionadas diretamente pela extração de assinaturas de ataque em tempo real.
+- [ ] **Loop de Feedback MAPE-K**: Ajuste dinâmico da profundidade da extração com base no nível de confiança do classificador externo.
+
+---
+**Lynceus: Extração Precisa, Integridade Absoluta.**
