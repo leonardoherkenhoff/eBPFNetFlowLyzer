@@ -153,6 +153,10 @@ static int num_workers = 1;
 static volatile bool exiting = false;
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args) {
+    return vfprintf(stderr, format, args);
+}
+
 /**
  * @brief High-precision monotonic timestamp.
  */
@@ -289,29 +293,42 @@ void *worker_fn(void *arg) {
  * and attaches XDP programs to the specified interfaces.
  */
 int main(int argc, char **argv) {
-    if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
+    libbpf_set_print(libbpf_print_fn);
+    fprintf(stderr, "[DEBUG] Starting Lynceus Loader...\n");
+    if (argc < 2) { fprintf(stderr, "❌ Usage: %s <iface>\n", argv[0]); return 1; }
+    struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; 
+    if (setrlimit(RLIMIT_MEMLOCK, &r)) { fprintf(stderr, "❌ Failed to set RLIMIT_MEMLOCK\n"); }
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
+    fprintf(stderr, "[DEBUG] Creating telemetry directory...\n");
     mkdir("worker_telemetry", 0777);
-    int cores = sysconf(_SC_NPROCESSORS_ONLN); num_workers = cores;
+    int cores = sysconf(_SC_NPROCESSORS_ONLN); 
+    fprintf(stderr, "[DEBUG] Detected %d cores\n", cores);
+    num_workers = cores;
     workers = calloc(num_workers, sizeof(struct worker_t));
+    fprintf(stderr, "[DEBUG] Opening BPF object...\n");
     struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
-    if (!obj) { fprintf(stderr, "❌ Failed to open eBPF object file\n"); return 1; }
+    if (!obj) { fprintf(stderr, "❌ Failed to open eBPF object file: %s\n", strerror(errno)); return 1; }
     
     struct bpf_map *rb_map = bpf_object__find_map_by_name(obj, "pkt_ringbuf_map");
-    if (rb_map) bpf_map__set_max_entries(rb_map, cores);
+    if (rb_map) {
+        fprintf(stderr, "[DEBUG] Resizing RingBuffer map to %d entries\n", cores);
+        bpf_map__set_max_entries(rb_map, cores);
+    }
     
+    fprintf(stderr, "[DEBUG] Loading BPF object into kernel...\n");
     if (bpf_object__load(obj)) { fprintf(stderr, "❌ Failed to load eBPF object into kernel\n"); return 1; }
     int outer_fd = bpf_map__fd(rb_map);
+    fprintf(stderr, "[DEBUG] Map FD: %d\n", outer_fd);
     for (int i = 0; i < num_workers; i++) {
         workers[i].id = i; 
         workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
-        if (workers[i].rb_fd < 0) { fprintf(stderr, "❌ Failed to create RingBuffer for core %d (Libbpf 1.2+ required)\n", i); return 1; }
+        if (workers[i].rb_fd < 0) { fprintf(stderr, "❌ Failed to create RingBuffer for core %d: %s\n", i, strerror(errno)); return 1; }
         if (bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY) < 0) {
-            fprintf(stderr, "❌ Failed to update RingBuffer map for core %d: %s\n", i, strerror(errno));
+            fprintf(stderr, "[DEBUG] [Loader] Map update failed for core %d\n", i);
             return 1;
         }
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scientific 399 Ready)\n", num_workers);
+    fprintf(stderr, "[DEBUG] [Lynceus Core] %d Workers (Scientific 399 Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     if (!p) { fprintf(stderr, "❌ Failed to find XDP program in object\n"); return 1; }

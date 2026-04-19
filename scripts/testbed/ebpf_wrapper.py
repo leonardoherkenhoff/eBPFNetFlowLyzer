@@ -79,8 +79,8 @@ def process_pcap_dir(pcap_dir, category):
                         if not line: break
                         f_log.write(line)
                         f_log.flush()
-                        if any(x in line for x in ["🚀", "📊", "⚠️", "❌", "System", "Error", "Fatal", "└─", "[Diagnostic]", "[Parser Errors]", "-", "🏆"]):
-                            print(f"   [Loader] {line.strip()}")
+                        # REMOVED FILTER FOR MAXIMUM DEBUG
+                        print(f"   [Loader] {line.strip()}")
             except Exception as e:
                 print(f"   [Wrapper] Log Thread Error: {e}")
         
