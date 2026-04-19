@@ -1,6 +1,6 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator (v2.5).
+ * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator (v2.6).
  */
 
 #define _GNU_SOURCE
@@ -23,7 +23,6 @@
 #include <errno.h>
 #include <sys/stat.h>
 
-/** @brief Global Configuration Constants */
 #define FLOW_HASH_SIZE 131072
 #define IO_BUFFER_SIZE (8 * 1024 * 1024)
 #define IDLE_TIMEOUT_NS 60000000000ULL 
@@ -79,13 +78,16 @@ static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)
 struct flow_state {
     struct flow_key key; struct flow_meta meta;
     struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat, active_s, idle_s, win_s;
-    struct w_stat t_pay_delta, f_pay_delta, b_pay_delta; /**< Size Deltas */
+    struct w_stat t_pay_delta, f_pay_delta, b_pay_delta;
     uint64_t f_bytes, b_bytes, f_last, b_last, t_last, active_start;
     uint32_t f_last_sz, b_last_sz, t_last_sz;
     uint16_t f_win_init, b_win_init;
     uint64_t flags[8], f_flags[8], b_flags[8];
     uint32_t dns_q_count, dns_a_count;
     double last_entropy;
+    uint16_t icmp_id;
+    uint64_t f_bulk_bytes, f_bulk_pkts, f_bulk_cnt;
+    uint64_t b_bulk_bytes, b_bulk_pkts, b_bulk_cnt;
     int active;
 };
 
@@ -120,13 +122,12 @@ static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns)
     double duration = (double)(ts_ns - s->meta.start_time) / 1e9;
     w->s_off += snprintf(w->s_buf + w->s_off, 16384, "%s-%s-%u-%u-%u,%.6f,%s,%u,%s,%u,%u,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,", sip, dip, ntohs(s->key.src_port), ntohs(s->key.dst_port), s->key.protocol, (double)s->meta.start_time/1e9, sip, ntohs(s->key.src_port), dip, ntohs(s->key.dst_port), s->key.protocol, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes);
     #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_skew(&W), w_kurt(&W))
-    FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr); FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->active_s); FMT_W(s->idle_s); FMT_W(s->win_s);
-    FMT_W(s->t_pay_delta); FMT_W(s->f_pay_delta); FMT_W(s->b_pay_delta);
+    FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr); FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->active_s); FMT_W(s->idle_s); FMT_W(s->win_s); FMT_W(s->t_pay_delta); FMT_W(s->f_pay_delta); FMT_W(s->b_pay_delta);
     w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,", s->f_win_init, s->b_win_init, (duration > 0 ? (s->f_bytes+s->b_bytes)/duration : 0), (duration > 0 ? s->f_bytes/duration : 0), (duration > 0 ? s->b_bytes/duration : 0), (duration > 0 ? s->t_pay.n/duration : 0), (duration > 0 ? s->b_pay.n/duration : 0), (duration > 0 ? s->f_pay.n/duration : 0), (s->f_pay.n > 0 ? (double)s->b_pay.n/s->f_pay.n : 0));
     for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
     #define FMT_H(W) for(int i=0; i<HIST_BINS; i++) w->s_off += snprintf(w->s_buf + w->s_off, 128, "%lu,", W.hist[i])
     FMT_H(s->t_pay); FMT_H(s->f_pay); FMT_H(s->b_pay);
-    w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%.4f,0,0,0,0,0,%u,%u,%.2f,0,0,0,0,0\n", s->last_entropy, s->dns_q_count, s->dns_a_count, (s->dns_q_count > 0 ? (double)s->dns_a_count/s->dns_q_count : 0));
+    w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%.4f,%u,%u,%u,%u,%u,%u,%.2f,%lu,%lu,%lu,%lu,%lu,%lu,%u,%u\n", s->last_entropy, s->meta.ip_ver, s->icmp_id, s->dns_q_count, s->dns_a_count, (s->dns_q_count > 0 ? (uint8_t)(s->dns_a_count/s->dns_q_count) : 0), s->dns_a_count, (s->dns_q_count > 0 ? (double)s->dns_a_count/s->dns_q_count : 0), s->f_bulk_bytes, s->f_bulk_pkts, s->f_bulk_cnt, s->b_bulk_bytes, s->b_bulk_pkts, s->b_bulk_cnt, (uint32_t)s->flags[0], (uint32_t)s->meta.eth_proto);
     if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
 }
 
@@ -159,12 +160,22 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     if (e->key.protocol == 6) w_update(&s->win_s, e->window_size);
     if (e->dns_answer_count > 0) { s->dns_a_count += e->dns_answer_count; s->dns_q_count++; }
     s->last_entropy = calculate_entropy(e->payload_hint, 64);
+    if (e->key.protocol == 1 || e->key.protocol == 58) s->icmp_id = (e->icmp_type << 8) | e->icmp_code;
+
     if (e->is_fwd) {
-        if (s->f_last > 0) { w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9); w_update(&s->f_pay_delta, abs((int)e->payload_len - (int)s->f_last_sz)); }
+        if (s->f_last > 0) { 
+            double f_iat = (double)(e->timestamp_ns - s->f_last) / 1e9;
+            w_update(&s->f_iat, f_iat); w_update(&s->f_pay_delta, abs((int)e->payload_len - (int)s->f_last_sz));
+            if (f_iat < 1.0) { s->f_bulk_bytes += e->payload_len; s->f_bulk_pkts++; } else s->f_bulk_cnt++;
+        }
         s->f_last = e->timestamp_ns; s->f_last_sz = e->payload_len; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
         s->f_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
     } else {
-        if (s->b_last > 0) { w_update(&s->b_iat, (double)(e->timestamp_ns - s->b_last) / 1e9); w_update(&s->b_pay_delta, abs((int)e->payload_len - (int)s->b_last_sz)); }
+        if (s->b_last > 0) { 
+            double b_iat = (double)(e->timestamp_ns - s->b_last) / 1e9;
+            w_update(&s->b_iat, b_iat); w_update(&s->b_pay_delta, abs((int)e->payload_len - (int)s->b_last_sz));
+            if (b_iat < 1.0) { s->b_bulk_bytes += e->payload_len; s->b_bulk_pkts++; } else s->b_bulk_cnt++;
+        }
         s->b_last = e->timestamp_ns; s->b_last_sz = e->payload_len; w_update(&s->b_pay, e->payload_len); w_update(&s->b_hdr, e->header_len);
         s->b_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
     }
@@ -188,7 +199,7 @@ void *worker_fn(void *arg) {
     for(int i=0; i<8; i++) fprintf(w->out_f, "%s_cnt,fwd_%s_cnt,bwd_%s_cnt,", flags[i], flags[i], flags[i]);
     const char *h_sets[] = {"t_pay", "f_pay", "b_pay"};
     for(int i=0; i<3; i++) for(int j=0; j<HIST_BINS; j++) fprintf(w->out_f, "hist_%s_bin%d,", h_sets[i], j);
-    fprintf(w->out_f, "payload_entropy,icmp_type,icmp_code,dns_ans_count,tcp_flags,ttl,dns_query_cnt,dns_ans_total,dns_ratio,al_u1,al_u2,al_u3,al_u4,al_u5\n");
+    fprintf(w->out_f, "payload_entropy,ip_ver,icmp_id,dns_query_cnt,dns_ans_total,dns_ratio_int,dns_ans_count,dns_ratio_float,f_bulk_bytes,f_bulk_pkts,f_bulk_cnt,b_bulk_bytes,b_bulk_pkts,b_bulk_cnt,tcp_flags_total,eth_proto\n");
     w->s_buf = malloc(IO_BUFFER_SIZE); w->s_off = 0;
     w->flow_table = calloc(FLOW_HASH_SIZE, sizeof(struct flow_state));
     w->rb = ring_buffer__new(w->rb_fd, handle_event, w, NULL);
@@ -215,7 +226,7 @@ int main(int argc, char **argv) {
         workers[i].id = i; workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Total Statistical Depth Ready)\n", num_workers);
+    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Monster Suite Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
