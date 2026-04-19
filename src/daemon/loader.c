@@ -177,6 +177,12 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
+    
+    /* Optimization: Use a large buffer for CSV output to prevent RingBuffer drops */
+    static char out_buf[1024 * 1024];
+    setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
+
+    /* Scientific CSV Header (v2.1.1 Master) */
     printf("flow_id,src_ip,src_port,dst_ip,dst_port,protocol,timestamp,duration,PacketsCount,FwdPacketsCount,BwdPacketsCount,TotalBytes,FwdBytes,BwdBytes,FwdBwdPktRatio,FwdBwdByteRatio,");
     const char *dirs[] = {"Tot", "Fwd", "Bwd"}; const char *metrics[] = {"Pay", "Hdr", "IAT", "DeltaLen"};
     for(int m=0; m<4; m++) for(int d=0; d<3; d++) printf("%s_%s_Max,%s_%s_Min,%s_%s_Mean,%s_%s_Std,%s_%s_Var,%s_%s_Median,%s_%s_Skew,%s_%s_Kurt,%s_%s_CoV,%s_%s_Mode,", dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m]);

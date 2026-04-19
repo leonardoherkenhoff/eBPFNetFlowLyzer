@@ -78,8 +78,7 @@ def process_pcap_dir(pcap_dir, category):
                 ["sudo", LOADER_BIN, "veth1"], 
                 stdout=f_out, 
                 stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1
+                text=True
             )
             
             # Real-time Forensic Log Streamer
