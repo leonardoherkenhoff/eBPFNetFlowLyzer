@@ -1,0 +1,281 @@
+% ============================================================
+%  eBPFNetFlowLyzer – Proposta de Projeto
+%  Disciplina: Tópicos Especiais em Redes / eBPF
+%  Apresentação: 27/04/2026
+% ============================================================
+\documentclass[aspectratio=169, 10pt]{beamer}
+
+% ---------- Tema e Cores (High Contrast / Academic) ----------
+\usetheme[progressbar=frametitle]{metropolis}
+\usepackage{appendixnumberbeamer}
+
+% Paleta de Cores Acadêmica de Alto Contraste (Clean & Professional)
+\definecolor{PrimaryDark}{HTML}{1A365D}    % Azul escuro intenso (títulos)
+\definecolor{SecondaryAccent}{HTML}{E53E3E} % Vermelho acadêmico (alertas)
+\definecolor{SuccessGreen}{HTML}{2F855A}  % Verde escuro (pontos fortes)
+\definecolor{TextGray}{HTML}{2D3748}      % Cinza escuro para texto padrão
+\definecolor{BgWhite}{HTML}{FFFFFF}       % Fundo puro
+\definecolor{LightGray}{HTML}{EDF2F7}     % Fundo de blocos
+
+\setbeamercolor{frametitle}{bg=BgWhite, fg=PrimaryDark}
+\setbeamercolor{background canvas}{bg=BgWhite}
+\setbeamercolor{normal text}{fg=TextGray}
+\setbeamercolor{alerted text}{fg=SecondaryAccent}
+\setbeamercolor{structure}{fg=PrimaryDark}
+\setbeamercolor{block title}{bg=LightGray, fg=PrimaryDark}
+\setbeamercolor{block body}{bg=BgWhite, fg=TextGray}
+\setbeamercolor{progress bar}{fg=PrimaryDark, bg=LightGray}
+
+% ---------- Pacotes ----------
+\usepackage[brazil]{babel}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{fontawesome5}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, fit, backgrounds, shapes.geometric}
+\usepackage{booktabs}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+% ---------- Metadados ----------
+\title{\textbf{eBPFNetFlowLyzer}}
+\subtitle{Extração Distribuída e Resiliência Causal a Ataques de Exaustão de Estado via eBPF/XDP}
+\author{Leonardo Herkenhoff}
+\date{27 de Abril de 2026}
+\institute{Mestrado em Ciência da Computação}
+
+% ============================================================
+\begin{document}
+
+\maketitle
+
+% ---- Agenda ----
+\begin{frame}{Sumário Científico}
+  \tableofcontents[hideallsubsections]
+\end{frame}
+
+% ==============================================================
+\section{1. Problema de Pesquisa}
+% ==============================================================
+
+\begin{frame}{O Gargalo Estrutural: Colapso de Agregação}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+      \textbf{\color{PrimaryDark} O Paradigma Tradicional (User-Space)}
+      \vspace{0.4em}
+      \begin{itemize}
+        \item Extratores clássicos (\textit{CICFlowMeter, NTLFlowLyzer}) dependem do pipeline lento: \texttt{NIC \textrightarrow\ Kernel TCP/IP \textrightarrow\ libpcap \textrightarrow\ User-space}.
+        \item Enfrentam \textbf{estouro de buffers} sistêmicos sob ataques volumétricos.
+      \end{itemize}
+      
+      \vspace{0.8em}
+      \textbf{\color{SecondaryAccent} Aggregation Collapse (\textit{Benchmark 2026})}
+      \begin{itemize}
+        \item Timeouts estáticos e sobrecarga colapsam a granularidade real da rede.
+        \item Em TCP SYN Flood, atestamos uma \textbf{perda de 63\% na granularidade}: apenas \textbf{6.17M} de eventos extraídos frente aos \textbf{10.02M} reais.
+      \end{itemize}
+
+    \column{0.42\textwidth}
+      \begin{tikzpicture}
+        \node[draw=SecondaryAccent, thick, fill=white, rounded corners, text width=4.8cm, inner sep=6pt] (box) {
+          \color{SecondaryAccent}\faExclamationTriangle\quad \textbf{Impacto Causal Diante do Ataque}\\[4pt]
+          \color{TextGray}\scriptsize
+          A ferramenta aglutina múltiplos eventos discretos em fluxos espúrios irreparáveis. O \textit{ground-truth} físico da rede não é refletido nos datasets gerados, comprometendo qualquer indução estatística posterior.
+        };
+      \end{tikzpicture}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{O Efeito Cascata: Viés em Machine Learning}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+      \begin{block}{Data Leakage Volumétrico}
+        \begin{itemize}
+          \item Artefatos arquiteturais inserem anomalias na geração do dataset.
+          \item Modelos atingem F1-Scores irrealistas (e.g., \textbf{0.9998}) explorando correlações de colapso, não os padrões legítimos da intrusão.
+          \item Datasets referência (como CIC-DDoS2019) foram corrompidos por este viés subjacente.
+        \end{itemize}
+      \end{block}
+
+    \column{0.48\textwidth}
+      \begin{block}{F1 Blindness (A Cegueira Estatística)}
+        \begin{itemize}
+          \item Ao aplicar modelos enviesados em protocolos \textit{stateless} severos (ex: instâncias UDP), o colapso do classificador é exposto.
+          \item A acurácia despenca: o score emparelhado cai para \textbf{F1 = 0.8499}.
+        \end{itemize}
+      \end{block}
+  \end{columns}
+  \vspace{1.0em}
+  \begin{center}
+    \large\textbf{\color{PrimaryDark} É necessário descer ao kernel-space para garantir uma extração 1:1, resiliente ao estresse de linha (\textit{wire-speed}).}
+  \end{center}
+\end{frame}
+
+% ==============================================================
+\section{2. Trabalhos Relacionados e Lacuna Cinetífica}
+% ==============================================================
+
+\begin{frame}{Análise do Estado da Arte em eBPF}
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+      \textbf{\color{PrimaryDark}\faBook\ RustiFlow (Verkerken et al., 2025)}
+      \begin{itemize}
+        \item Extrator em Rust usando biblioteca \textit{Aya}. Suporta L3/L4.
+        \item \textcolor{SecondaryAccent}{Limitado a roteamento TCP/IP, sem observabilidade L7.}
+      \end{itemize}
+      \vspace{0.4em}
+      \textbf{\color{PrimaryDark}\faBook\ NetFeatureXtract (Einsfeldt, 2025)}
+      \begin{itemize}
+        \item Foco em filtragem através de Information Gain (IG), usa Go/C.
+        \item \textcolor{SecondaryAccent}{Sem capacidade intrínseca L7 e ausência de mitigação ativa em testbeds físicos multi-Gbps.}
+      \end{itemize}
+      \vspace{0.6em}
+      \textbf{\color{SuccessGreen}\faArrowRight\ Nossa Proposta (eBPFNetFlowLyzer)}
+      \begin{itemize}
+        \item Hook XDP integrando NTLFlowLyzer (348 features) e ALFlowLyzer (79 globais + 51 em DNS).
+      \end{itemize}
+
+    \column{0.42\textwidth}
+      \begin{tikzpicture}[font=\scriptsize]
+        \node[draw=PrimaryDark, thick, fill=white, rounded corners, inner sep=6pt, text width=4.5cm] {
+          \color{PrimaryDark}\textbf{Lacuna de Pesquisa Aberta}\\[6pt]
+          \color{TextGray}
+          \begin{tabular}{lccc}
+            \toprule
+            \textbf{Func} & \textbf{RF} & \textbf{NFX} & \textbf{Nós} \\
+            \midrule
+            L3/L4 & \color{SuccessGreen}\faCheck & \color{SuccessGreen}\faCheck & \color{SuccessGreen}\textbf{\faCheck} \\
+            L7 (DNS) & \color{SecondaryAccent}\faTimes & \color{SecondaryAccent}\faTimes & \color{SuccessGreen}\textbf{\faCheck} \\
+            Atômico & \color{SecondaryAccent}\faTimes & \color{SecondaryAccent}\faTimes & \color{SuccessGreen}\textbf{\faCheck} \\
+            Mitigação & \color{SecondaryAccent}\faTimes & \color{SecondaryAccent}\faTimes & \color{SuccessGreen}\textbf{\faCheck} \\
+            \bottomrule
+          \end{tabular}\\[4pt]
+        };
+      \end{tikzpicture}
+  \end{columns}
+\end{frame}
+
+% ==============================================================
+\section{3. Arquitetura Proposta: eBPFNetFlowLyzer}
+% ==============================================================
+
+\begin{frame}{Desacoplamento e Assincronia via BPF\_RINGBUF}
+  \begin{center}
+  \begin{tikzpicture}[
+    font=\scriptsize,
+    box/.style={draw, rounded corners=3pt, minimum height=1cm, text width=2.4cm, align=center, inner sep=4pt, font=\sffamily\bfseries},
+    arr/.style={-{Stealth[length=6pt]}, thick, color=PrimaryDark},
+    karr/.style={-{Stealth[length=6pt]}, thick, color=SecondaryAccent, dashed},
+  ]
+    % ---- Kernel space band ----
+    \fill[LightGray, rounded corners] (-0.8,-0.3) rectangle (8.8, 2.5);
+    \node[color=PrimaryDark, font=\tiny\bfseries] at (0.5, 2.25) {\faLinux\ KERNEL SPACE (XDP Fast Path)};
+
+    % ---- User space band ----
+    \fill[white, draw=LightGray, thick, rounded corners] (-0.8,-2.9) rectangle (8.8,-0.4);
+    \node[color=TextGray, font=\tiny\bfseries] at (0.5,-0.65) {USER SPACE (Go Daemon)};
+
+    % ---- Nodes ----
+    \node[box, fill=white, draw=TextGray, text=TextGray] (nic) at (0,1) {NIC Ingress \\ \faEthernet};
+
+    \node[box, fill=PrimaryDark!10!white, draw=PrimaryDark, text=PrimaryDark] (xdp) at (2.8,1) {eBPF Hook (\texttt{main.c})\\Parsing Atômico L2-L7\\(SYN+RST Tracking)};
+
+    \node[box, fill=PrimaryDark!80!white, draw=PrimaryDark, text=white, minimum height=1.4cm, text width=1.6cm] (ring) at (5.7,1) {BPF\\Ring Buffer};
+
+    \node[box, fill=SuccessGreen!10!white, draw=SuccessGreen, text=SuccessGreen, text width=2.8cm] (go) at (5.7,-1.8) {\texttt{main.go} Loader\\Aggregation routines\\L3/L4/L7 Pipeline};
+
+    \node[box, fill=white, draw=TextGray, text=TextGray] (csv) at (8.3,-1.8) {CSV\\(Ground-Truth)};
+
+    % ---- XDP Map (blacklist feedback) ----
+    \node[box, fill=white, draw=SecondaryAccent!50, text=SecondaryAccent, text width=2cm, font=\tiny\bfseries] (blk) at (2.8,-1.8) {Blacklist Map\\\textbf{XDP\_DROP} (Fase 3)};
+
+    % ---- Arrows ----
+    \draw[arr] (nic) -- (xdp);
+    \draw[arr] (xdp) -- node[above, color=PrimaryDark, font=\tiny\itshape]{Hash / Telemetria} (ring);
+    \draw[arr] (ring) -- (go) node[midway, right, color=PrimaryDark, font=\tiny\bfseries]{\faDownload\ Poll};
+    \draw[arr] (go) -- (csv);
+    \draw[karr] (go) -- node[above, color=SecondaryAccent, font=\tiny, align=center]{Feedback loop} (blk);
+    \draw[karr] (blk) -- (xdp);
+
+  \end{tikzpicture}
+  \end{center}
+  \vspace{-0.5em}
+  \begin{center}
+    \footnotesize\textbf{Inovação Chave:} Identificação atômica de cada handshake TCP (\textbf{SYN+RST bidirecional}), blindado contra o Colapso de Agregação independentemente do tamanho da fila.
+  \end{center}
+\end{frame}
+
+% ==============================================================
+\section{4. Metodologia e Conclusão}
+% ==============================================================
+
+\begin{frame}{Plano de Validação Física (Testbed Multi-Gbps)}
+  \begin{columns}[T]
+    \column{0.48\textwidth}
+      \begin{block}{Topologia do Experimento}
+        \begin{itemize}
+          \item \textbf{Attacker Node:} \texttt{hping3} e \texttt{T-Rex} simulando estresse de banda maciço.
+          \item \textbf{Sensor (DUT):} Stack eBPF/Go capturando.
+          \item Medições via \texttt{perf} e \texttt{bpftool prog}.
+        \end{itemize}
+      \end{block}
+
+    \column{0.48\textwidth}
+      \begin{block}{Parâmetros de Benchmark}
+        \begin{itemize}
+          \item \textbf{Atestando a Granularidade:} Medir taxa de extração vs. taxa de injeção em SYN Floods massivos sob 10 Gbps. A meta é proporção 1:1.
+          \item \textbf{Recuperação F1:} Prova de viabilidade contra o F1 Blindness em classificadores ML.
+        \end{itemize}
+      \end{block}
+  \end{columns}
+\end{frame}
+
+\begin{frame}{Cronograma da Disciplina vs Dissertação}
+  \begin{center}
+  \begin{tikzpicture}[font=\scriptsize, scale=0.9, every node/.style={transform shape}]
+    
+    \def\bw{1.2} % bar width
+    \def\bh{0.38} % bar height
+    \def\gap{0.12}
+
+    % Headers
+    \foreach \w/\x in {1/0, 2/1.2, 3/2.4, 4/3.6, 5/4.8, 6/6.0, 7/7.2, 8/8.4, 9/9.6} {
+      \node[color=PrimaryDark, font=\tiny\bfseries] at (\x+0.6, 3.5) {Sem \w};
+    }
+
+    % Tasks
+    \foreach \row/\label/\start/\dur/\clr in {
+      0/{Revisão, Setup \& Makefile (C/Go)}/0/2.0/PrimaryDark,
+      1/{XDP C: Core parser \& RingBuf (L2/L3)}/2.0/2.0/PrimaryDark,
+      2/{Go Daemon: Pooler \& State Assembler}/4.0/2.0/SuccessGreen,
+      3/{L7 DNS Features \& Handshake Completo}/5.0/2.0/SuccessGreen,
+      4/{Testbed Físico + Geração de Datasets}/7.0/1.2/SecondaryAccent,
+      5/{Relatório, Comparações \& Entrega}/8.2/1.8/TextGray} {
+      \pgfmathsetmacro{\ypos}{-\row * (\bh + \gap)}
+      \fill[\clr!15!white, draw=\clr, thick, rounded corners=2pt]
+        (\start*\bw, \ypos) rectangle (\start*\bw + \dur*\bw, \ypos+\bh);
+      \node[color=\clr!80!black, font=\tiny\bfseries, anchor=west] at (\start*\bw + 0.1, \ypos+\bh/2) {\label};
+    }
+
+    % Week separator lines
+    \foreach \x in {0, 1.2, 2.4, 3.6, 4.8, 6.0, 7.2, 8.4, 9.6, 10.8} {
+      \draw[LightGray, dashed, thin] (\x, 0.4) -- (\x, -3.0);
+    }
+  \end{tikzpicture}
+  \end{center}
+  
+  \vspace{1.0em}
+  \begin{center}
+    \footnotesize\color{TextGray} O desenvolvimento estrito de classificadores de IA preditivos e do mapa \textbf{XDP\_DROP} de mitigação se dará integralmente na tese do Mestrado (Fases 2 e 3).
+  \end{center}
+\end{frame}
+
+\begin{frame}[standout]
+  \Huge Obrigado.\\
+  \vspace{0.8em}
+  \normalsize \faGithub\ github.com/leonardoherkenhoff/eBPFNetFlowLyzer\\[1em]
+\end{frame}
+
+\end{document}
