@@ -21,6 +21,7 @@
 #include <string.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include <stdbool.h>
 #include <unistd.h>
 #include <sys/resource.h>
 #include <signal.h>
@@ -111,6 +112,9 @@ static uint32_t hash_key(struct flow_key *k) {
     uint32_t h = 0; for (int i = 0; i < 16; i++) h = h * 31 + k->src_ip[i] + k->dst_ip[i];
     return (h * 31 + k->src_port + k->dst_port + k->protocol) % HASH_SIZE;
 }
+
+static volatile bool exiting = false;
+static void sig_handler(int sig) { (void)sig; exiting = true; }
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)ctx; (void)data_sz; const struct packet_event_t *e = data;
