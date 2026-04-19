@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.0)
+Lynceus Research Pipeline - Extraction Wrapper & Testbed Orchestrator (v1.0)
 -----------------------------------------------------------
 v1.0 Stable Research Milestone:
+- Engine: Lynceus v2.0 (Massively Parallel eBPF Extractor).
 - "Extract-Label-Purge" Strategy: Integrates labelling and cleanup into the loop.
-- Post-Extraction Flush Resilience: Optimized timeout for multi-core buffer flushing.
 - Ensures massive dataset benchmarks fit in production storage partitions.
 """
 
@@ -152,11 +152,11 @@ def process_pcap_dir(pcap_dir, category):
     with open(os.path.join(output_dir, "summary.json"), 'w') as f:
         json.dump(summary, f, indent=4)
         
-    print(f"✅ DONE: {total_packets} packets | {elapsed:.2f}s | {pps:.2f} pps")
+    print(f"✅ DONE: {total_packets} packets | {elapsed:.2f}s | {pps:.2f} pps [Lynceus Engine]")
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== eBPFNetFlowLyzer Research Pipeline (v1.0 Iterative) ===")
+    print("=== Lynceus Research Pipeline (v1.0 Iterative) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return

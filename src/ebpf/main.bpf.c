@@ -1,6 +1,6 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - Milestone 1: Stable Parallel Extractor (v1.0).
+ * @brief Lynceus Data Plane - Milestone 2: Parallel Flow Extractor (v2.0).
  * 
  * @details 
  * Arquitetura massivamente paralela baseada em Dynamic Map-in-Map RingBuffers.
@@ -14,7 +14,7 @@
  * 3. Fidelidade de Dados: Exportação atômica de eventos 'packet_event_t' para o
  *    ciclo autonômico MAPE-K em user-space.
  * 
- * @version 1.0 (Stable / Milestone 1)
+ * @version 2.0 (Lynceus Core / Stable)
  */
 
 #include "vmlinux.h"
