@@ -51,21 +51,21 @@ def process_pcap_dir(pcap_dir, category):
     os.makedirs(WORKER_DATA_DIR, exist_ok=True)
     
     # --- Step 1: Network Topology Initialization ---
-    subprocess.run(["sudo", "ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
-    subprocess.run(["sudo", "ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1"], check=True)
-    subprocess.run(["sudo", "ip", "link", "set", "veth0", "up"], check=True)
-    subprocess.run(["sudo", "ip", "link", "set", "veth1", "up"], check=True)
+    subprocess.run(["ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
+    subprocess.run(["ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1"], check=True)
+    subprocess.run(["ip", "link", "set", "veth0", "up"], check=True)
+    subprocess.run(["ip", "link", "set", "veth1", "up"], check=True)
     
-    subprocess.run(["sudo", "sysctl", "-w", "net.ipv6.conf.veth0.disable_ipv6=0"], check=False)
-    subprocess.run(["sudo", "sysctl", "-w", "net.ipv6.conf.veth1.disable_ipv6=0"], check=False)
-    subprocess.run(["sudo", "sysctl", "-w", "net.ipv6.conf.all.forwarding=1"], check=False)
+    subprocess.run(["sysctl", "-w", "net.ipv6.conf.veth0.disable_ipv6=0"], check=False)
+    subprocess.run(["sysctl", "-w", "net.ipv6.conf.veth1.disable_ipv6=0"], check=False)
+    subprocess.run(["sysctl", "-w", "net.ipv6.conf.all.forwarding=1"], check=False)
 
     try:
         # --- Step 2: Daemon Ignition ---
         loader_log_path = os.path.join(output_dir, "loader_stderr.log")
         
         proc_loader = subprocess.Popen(
-            ["sudo", LOADER_BIN, "veth1"], 
+            [LOADER_BIN, "veth1"], 
             stdout=subprocess.DEVNULL, 
             stderr=subprocess.PIPE,
             text=True,
@@ -101,7 +101,7 @@ def process_pcap_dir(pcap_dir, category):
         
         for p in pcaps:
             print(f"   Streaming: {os.path.basename(p)}")
-            cmd = f"sudo tcpreplay -i veth0 -t {p} 2>&1"
+            cmd = f"tcpreplay -i veth0 -t {p} 2>&1"
             try:
                 res = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
                 matches = re.findall(r"(\d+)\s+packets", res.stdout)
@@ -119,12 +119,12 @@ def process_pcap_dir(pcap_dir, category):
             proc_mon.terminate()
             proc_mon.wait()
         
-        subprocess.run(["sudo", "kill", "-INT", str(proc_loader.pid)], check=False)
+        subprocess.run(["kill", "-INT", str(proc_loader.pid)], check=False)
         try:
             proc_loader.wait(timeout=300)
         except subprocess.TimeoutExpired:
             print("   ⚠️ Loader timed out. Force killing...")
-            subprocess.run(["sudo", "kill", "-9", str(proc_loader.pid)], check=False)
+            subprocess.run(["kill", "-9", str(proc_loader.pid)], check=False)
             
         log_thread.join(timeout=10)
 
@@ -137,13 +137,13 @@ def process_pcap_dir(pcap_dir, category):
             except Exception as e:
                 print(f"   ⚠️ Failed to move {os.path.basename(wf)}: {e}")
         
-        # --- NEW v1.9.12: Iterative Labeling and Purging ---
+        # --- Labeling and Purging ---
         print(f"   🏷️  Running Iterative Labeling for {experiment_name}...")
         label_cmd = f"python3 {LABELER_SCRIPT} --path {output_dir} --cleanup"
         subprocess.run(label_cmd, shell=True, check=False)
             
     finally:
-        subprocess.run(["sudo", "ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
+        subprocess.run(["ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
     
     summary = {
         "experiment": experiment_name, "packets_sent": total_packets,
