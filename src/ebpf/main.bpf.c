@@ -1,11 +1,16 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - Universal Protocol Extractor (v4.0.3).
+ * @brief eBPF Data Plane - Universal Research Extractor (v1.9.1).
  * 
  * @details 
- * This program operates at the XDP (Express Data Path) layer for maximum throughput.
- * It performs L3/L4/L7 dissection, bidirectional flow tracking, and streams 
- * per-packet telemetry to user-space via BPF RingBuffer.
+ * Este programa opera na camada XDP (Express Data Path) para extração stateless 
+ * de telemetria bidirecional. 
+ * 
+ * Formalismo de Fluxo:
+ * - Chave ($\mathcal{K}$): $\mathcal{K} = \{IP_{src}, IP_{dst}, P_{src}, P_{dst}, Prot\}$
+ * - Normalização: $\mathcal{K}_{norm} = \min(\mathcal{K}_{fwd}, \mathcal{K}_{rev})$
+ * 
+ * @version 1.9.1 (Milestone 3 Pre-v2.0)
  */
 
 #include "vmlinux.h"

@@ -1,13 +1,18 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Unified Master Research Extractor (v2.1.0).
+ * @brief User-Space Control Plane - Milestone 3: Unified Research Extractor (v1.9.1).
  * 
  * @details 
- * Implements the full unification of NTLFlowLyzer (348 features) and ALFlowLyzer (130 features).
- * Consolidates redundancies while maintaining 100% feature coverage across L3/L4/L7.
- * Includes O(1) estimators for Median, Mode, and CoV alongside high-order moments.
+ * Este orquestrador realiza a unificação taxonômica do NTLFlowLyzer e ALFlowLyzer.
+ * Implementa o cálculo de momentos estatísticos de ordem $k \in \{1, 2, 3, 4\}$ 
+ * em complexidade $O(1)$ via algoritmo de Pébay/Welford.
  * 
- * @version 2.1.0
+ * Formalismo Matemático:
+ * - Média ($\mu$): $\mu_n = \mu_{n-1} + \frac{x_n - \mu_{n-1}}{n}$
+ * - Variância ($\sigma^2$): $M_{2,n} = M_{2,n-1} + (x_n - \mu_{n-1})(x_n - \mu_n)$
+ * - Entropia ($H$): $H(X) = -\sum_{i=1}^n P(x_i) \log_2 P(x_i)$
+ * 
+ * @version 1.9.1 (Milestone 3 Pre-v2.0)
  */
 
 #include <stdio.h>
@@ -182,7 +187,7 @@ int main(int argc, char **argv) {
     static char out_buf[1024 * 1024];
     setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
 
-    /* Scientific CSV Header (v2.1.1 Master) */
+    /* Scientific CSV Header (v1.9.1 Master) */
     printf("flow_id,src_ip,src_port,dst_ip,dst_port,protocol,timestamp,duration,PacketsCount,FwdPacketsCount,BwdPacketsCount,TotalBytes,FwdBytes,BwdBytes,FwdBwdPktRatio,FwdBwdByteRatio,");
     const char *dirs[] = {"Tot", "Fwd", "Bwd"}; const char *metrics[] = {"Pay", "Hdr", "IAT", "DeltaLen"};
     for(int m=0; m<4; m++) for(int d=0; d<3; d++) printf("%s_%s_Max,%s_%s_Min,%s_%s_Mean,%s_%s_Std,%s_%s_Var,%s_%s_Median,%s_%s_Skew,%s_%s_Kurt,%s_%s_CoV,%s_%s_Mode,", dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m]);
