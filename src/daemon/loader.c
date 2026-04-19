@@ -1,19 +1,16 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: High-Performance Real-Time Extractor (v1.9.3).
+ * @brief User-Space Control Plane - Milestone 3: Industrial Real-Time Extractor (v1.9.4).
  * 
  * @details 
- * Implementação otimizada para o ciclo MAPE-K via processamento paralelo multithread.
- * Utiliza um modelo de Dispatcher-Worker para decompor a fase de Analyze do ciclo autonômico,
- * permitindo a extração de 400+ features a taxas de rede (Tested up to 33M packets).
+ * Implementação de alto desempenho otimizada para o processador XEON SILVER 4410Y.
+ * Utiliza escalonamento dinâmico de threads com afinidade de CPU (Thread Pinning) 
+ * e motor de análise particionado para o ciclo autonômico MAPE-K.
  * 
- * Formalismo Matemático:
- * - Média ($\mu$): $\mu_n = \mu_{n-1} + \frac{x_n - \mu_{n-1}}{n}$
- * - Variância ($\sigma^2$): $M_{2,n} = M_{2,n-1} + (x_n - \mu_{n-1})(x_n - \mu_n)$
- * 
- * @version 1.9.3 (MAPE-K Real-Time Edition)
+ * @version 1.9.4 (Xeon Optimized Edition)
  */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -33,8 +30,7 @@
 
 #define HASH_SIZE 32768
 #define HISTOGRAM_BINS 64
-#define NUM_WORKERS 7
-#define QUEUE_SIZE 65536
+#define QUEUE_SIZE 131072
 
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
@@ -98,17 +94,19 @@ struct flow_state {
 
 struct worker_t {
     pthread_t thread;
-    struct packet_event_t queue[QUEUE_SIZE];
+    struct packet_event_t *queue;
     volatile uint64_t head, tail;
-    struct flow_state flow_table[HASH_SIZE];
+    struct flow_state *flow_table;
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int id;
 };
 
-static struct worker_t workers[NUM_WORKERS];
+static struct worker_t *workers;
+static int num_workers = 1;
 static volatile bool exiting = false;
-static void sig_handler(int sig) { (void)sig; exiting = true; for(int i=0; i<NUM_WORKERS; i++) pthread_cond_signal(&workers[i].cond); }
+
+static void sig_handler(int sig) { (void)sig; exiting = true; for(int i=0; i<num_workers; i++) pthread_cond_signal(&workers[i].cond); }
 
 static uint32_t hash_key(struct flow_key *k) {
     uint32_t h = 0; for (int i = 0; i < 16; i++) h = h * 31 + k->src_ip[i] + k->dst_ip[i];
@@ -117,6 +115,9 @@ static uint32_t hash_key(struct flow_key *k) {
 
 void *worker_fn(void *arg) {
     struct worker_t *w = arg;
+    cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id + 1, &cpuset);
+    pthread_setaffinity_np(w->thread, sizeof(cpu_set_t), &cpuset);
+    
     char s_buf[4096];
     while (!exiting) {
         pthread_mutex_lock(&w->mutex);
@@ -176,7 +177,7 @@ void *worker_fn(void *arg) {
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)ctx; (void)data_sz; const struct packet_event_t *e = data;
-    uint32_t w_idx = hash_key((struct flow_key *)&e->key) % NUM_WORKERS;
+    uint32_t w_idx = hash_key((struct flow_key *)&e->key) % num_workers;
     struct worker_t *w = &workers[w_idx];
     pthread_mutex_lock(&w->mutex);
     if (w->head - w->tail < QUEUE_SIZE) {
@@ -191,7 +192,11 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
-    static char out_buf[2 * 1024 * 1024]; setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
+    static char out_buf[4 * 1024 * 1024]; setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
+
+    int cores = sysconf(_SC_NPROCESSORS_ONLN);
+    num_workers = (cores > 1) ? cores - 1 : 1;
+    workers = calloc(num_workers, sizeof(struct worker_t));
 
     printf("flow_id,src_ip,src_port,dst_ip,dst_port,protocol,timestamp,duration,PacketsCount,FwdPacketsCount,BwdPacketsCount,TotalBytes,FwdBytes,BwdBytes,FwdBwdPktRatio,FwdBwdByteRatio,");
     const char *dirs[] = {"Tot", "Fwd", "Bwd"}; const char *metrics[] = {"Pay", "Hdr", "IAT", "DeltaLen"};
@@ -200,9 +205,13 @@ int main(int argc, char **argv) {
     for(int i=0; i<8; i++) printf("%s_Cnt,%s_Fwd_Cnt,%s_Bwd_Cnt,", flgs[i], flgs[i], flgs[i]);
     printf("PayloadEntropy,IcmpType,IcmpCode,TTL\n");
 
-    for (int i = 0; i < NUM_WORKERS; i++) {
-        workers[i].id = i; pthread_mutex_init(&workers[i].mutex, NULL);
-        pthread_cond_init(&workers[i].cond, NULL); pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
+    for (int i = 0; i < num_workers; i++) {
+        workers[i].id = i; 
+        workers[i].queue = malloc(sizeof(struct packet_event_t) * QUEUE_SIZE);
+        workers[i].flow_table = calloc(HASH_SIZE, sizeof(struct flow_state));
+        pthread_mutex_init(&workers[i].mutex, NULL);
+        pthread_cond_init(&workers[i].cond, NULL); 
+        pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     }
 
     struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
@@ -212,6 +221,6 @@ int main(int argc, char **argv) {
     int fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf");
     struct ring_buffer *rb = ring_buffer__new(fd, handle_event, NULL, NULL);
     while (!exiting) ring_buffer__poll(rb, 100);
-    for (int i = 0; i < NUM_WORKERS; i++) pthread_join(workers[i].thread, NULL);
+    for (int i = 0; i < num_workers; i++) pthread_join(workers[i].thread, NULL);
     ring_buffer__free(rb); bpf_object__close(obj); return 0;
 }
