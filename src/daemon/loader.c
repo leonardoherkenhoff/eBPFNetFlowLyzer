@@ -1,13 +1,6 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Non-Redundant Research Extractor (v2.3-Scientific).
- * 
- * @details 
- * Implements the unified 399-Feature set:
- * - NTLFlowLyzer (348 features)
- * - ALFlowLyzer (51 unique non-redundant L7 features)
- * 
- * Optimized for N-Core Shared-Nothing Parallelism.
+ * @brief Lynceus Control Plane - Parallel Flow-Level Extractor (v2.4-Fixed).
  */
 
 #define _GNU_SOURCE
@@ -32,7 +25,9 @@
 
 #define FLOW_HASH_SIZE 131072
 #define IO_BUFFER_SIZE (8 * 1024 * 1024)
+#define IDLE_TIMEOUT_NS 60000000000ULL 
 #define IDLE_THRESHOLD 1.0
+#define SEGMENT_THRESHOLD 5000 
 #define HIST_BINS 64
 
 struct flow_key {
@@ -55,7 +50,7 @@ struct packet_event_t {
     uint8_t ttl; uint8_t is_fwd;
     uint64_t timestamp_ns;
     uint8_t icmp_type; uint8_t icmp_code;
-    uint16_t dns_ans_count;
+    uint16_t dns_answer_count;
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
@@ -87,6 +82,7 @@ struct flow_state {
     uint16_t f_win_init, b_win_init;
     uint64_t flags[8], f_flags[8], b_flags[8];
     uint32_t dns_q_count, dns_a_count;
+    double last_entropy;
     int active;
 };
 
@@ -101,6 +97,11 @@ static int num_workers = 1;
 static volatile bool exiting = false;
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
+static uint64_t get_nstime(void) {
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
 static double calculate_entropy(const uint8_t *data, size_t len) {
     if (len == 0) return 0;
     uint64_t counts[256] = {0}; for (size_t i = 0; i < len; i++) counts[data[i]]++;
@@ -109,13 +110,28 @@ static double calculate_entropy(const uint8_t *data, size_t len) {
     return ent;
 }
 
+static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns) {
+    char sip[64], dip[64];
+    if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &s->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &s->key.dst_ip[12], dip, 64); }
+    else { inet_ntop(AF_INET6, s->key.src_ip, sip, 64); inet_ntop(AF_INET6, s->key.dst_ip, dip, 64); }
+    double duration = (double)(ts_ns - s->meta.start_time) / 1e9;
+    w->s_off += snprintf(w->s_buf + w->s_off, 16384, "%s-%s-%u-%u-%u,%.6f,%s,%u,%s,%u,%u,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,", sip, dip, ntohs(s->key.src_port), ntohs(s->key.dst_port), s->key.protocol, (double)s->meta.start_time/1e9, sip, ntohs(s->key.src_port), dip, ntohs(s->key.dst_port), s->key.protocol, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes);
+    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_skew(&W), w_kurt(&W))
+    FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr); FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->active_s); FMT_W(s->idle_s); FMT_W(s->win_s);
+    w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,", s->f_win_init, s->b_win_init, (duration > 0 ? (s->f_bytes+s->b_bytes)/duration : 0), (duration > 0 ? s->f_bytes/duration : 0), (duration > 0 ? s->b_bytes/duration : 0), (duration > 0 ? s->t_pay.n/duration : 0), (duration > 0 ? s->b_pay.n/duration : 0), (duration > 0 ? s->f_pay.n/duration : 0), (s->f_pay.n > 0 ? (double)s->b_pay.n/s->f_pay.n : 0));
+    for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
+    #define FMT_H(W) for(int i=0; i<HIST_BINS; i++) w->s_off += snprintf(w->s_buf + w->s_off, 128, "%lu,", W.hist[i])
+    FMT_H(s->t_pay); FMT_H(s->f_pay); FMT_H(s->b_pay);
+    w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%.4f,0,0,0,0,0,%u,%u,%.2f,0,0,0,0,0\n", s->last_entropy, s->dns_q_count, s->dns_a_count, (s->dns_q_count > 0 ? (double)s->dns_a_count/s->dns_q_count : 0));
+    if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
+}
+
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz; struct worker_t *w = ctx; const struct packet_event_t *e = data;
     uint32_t h = 0; const uint8_t *p = (const uint8_t *)&e->key;
     for (size_t i = 0; i < sizeof(struct flow_key); i++) h = h * 31 + p[i];
     uint32_t idx = h % FLOW_HASH_SIZE;
     while (w->flow_table[idx].active && memcmp(&w->flow_table[idx].key, &e->key, sizeof(struct flow_key)) != 0) idx = (idx + 1) % FLOW_HASH_SIZE;
-    
     if (!w->flow_table[idx].active) {
         memset(&w->flow_table[idx], 0, sizeof(struct flow_state)); memcpy(&w->flow_table[idx].key, &e->key, sizeof(struct flow_key));
         memcpy(&w->flow_table[idx].meta, &e->meta, sizeof(struct flow_meta));
@@ -126,10 +142,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         w->flow_table[idx].active = 1; w->flow_table[idx].active_start = e->timestamp_ns;
         if (e->is_fwd) w->flow_table[idx].f_win_init = e->window_size; else w->flow_table[idx].b_win_init = e->window_size;
     }
-
     struct flow_state *s = &w->flow_table[idx];
-    double ts = (double)e->timestamp_ns / 1e9, duration = (double)(e->timestamp_ns - s->meta.start_time) / 1e9;
-    
     if (s->t_last > 0) {
         double iat = (double)(e->timestamp_ns - s->t_last) / 1e9;
         w_update(&s->t_iat, iat);
@@ -138,8 +151,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     s->t_last = e->timestamp_ns;
     w_update(&s->t_pay, e->payload_len); w_update(&s->t_hdr, e->header_len);
     if (e->key.protocol == 6) w_update(&s->win_s, e->window_size);
-    if (e->dns_ans_count > 0) { s->dns_a_count += e->dns_ans_count; s->dns_q_count++; }
-    
+    if (e->dns_answer_count > 0) { s->dns_a_count += e->dns_answer_count; s->dns_q_count++; }
+    s->last_entropy = calculate_entropy(e->payload_hint, 64);
     if (e->is_fwd) {
         if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
         s->f_last = e->timestamp_ns; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
@@ -149,37 +162,8 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         s->b_last = e->timestamp_ns; w_update(&s->b_pay, e->payload_len); w_update(&s->b_hdr, e->header_len);
         s->b_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
     }
-
-    char sip[64], dip[64];
-    if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e->key.dst_ip[12], dip, 64); }
-    else { inet_ntop(AF_INET6, e->key.src_ip, sip, 64); inet_ntop(AF_INET6, e->key.dst_ip, dip, 64); }
-
-    /* Unified Non-Redundant Serialization (The Final 399) */
-    w->s_off += snprintf(w->s_buf + w->s_off, 16384, "%s-%s-%u-%u-%u,%.6f,%s,%u,%s,%u,%u,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,", sip, dip, ntohs(e->key.src_port), ntohs(e->key.dst_port), e->key.protocol, ts, sip, ntohs(e->key.src_port), dip, ntohs(e->key.dst_port), e->key.protocol, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes);
-    
-    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_skew(&W), w_kurt(&W))
-    FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay);
-    FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr);
-    FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat);
-    FMT_W(s->active_s); FMT_W(s->idle_s); FMT_W(s->win_s);
-
-    w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,", s->f_win_init, s->b_win_init, (duration > 0 ? (s->f_bytes+s->b_bytes)/duration : 0), (duration > 0 ? s->f_bytes/duration : 0), (duration > 0 ? s->b_bytes/duration : 0), (duration > 0 ? s->t_pay.n/duration : 0), (duration > 0 ? s->b_pay.n/duration : 0), (duration > 0 ? s->f_pay.n/duration : 0), (s->f_pay.n > 0 ? (double)s->b_pay.n/s->f_pay.n : 0));
-    
-    for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
-    
-    /* 192 Histogram Features (NTL Unique) */
-    #define FMT_H(W) for(int i=0; i<HIST_BINS; i++) w->s_off += snprintf(w->s_buf + w->s_off, 128, "%lu,", W.hist[i])
-    FMT_H(s->t_pay); FMT_H(s->f_pay); FMT_H(s->b_pay);
-
-    /* 51 Unique AL Features (DNS/Entropy Focus) */
-    w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%.4f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", 
-                        calculate_entropy(e->payload_hint, 64), 
-                        e->icmp_type, e->icmp_code, e->dns_ans_count, e->tcp_flags, e->ttl,
-                        s->dns_q_count, s->dns_a_count, (s->dns_q_count > 0 ? s->dns_a_count/s->dns_q_count : 0),
-                        0, 0, 0, 0, 0); // Padding for AL Unique parity
-    
-    if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
-    if (e->tcp_flags & 0x05) s->active = 0;
+    bool flush = (e->tcp_flags & 0x05) || (s->t_pay.n >= SEGMENT_THRESHOLD);
+    if (flush) { flush_flow(w, s, e->timestamp_ns); s->active = 0; }
     w->processed_events++;
     return 0;
 }
@@ -190,7 +174,6 @@ void *worker_fn(void *arg) {
     char fname[256]; sprintf(fname, "worker_telemetry/cpu_%d.csv", w->id);
     w->out_f = fopen(fname, "w"); if (!w->out_f) return NULL;
     setvbuf(w->out_f, NULL, _IOFBF, IO_BUFFER_SIZE);
-    
     fprintf(w->out_f, "flow_id,timestamp,src_ip,src_port,dst_ip,dst_port,protocol,duration,pkt_count,fwd_count,bwd_count,tot_bytes,fwd_bytes,bwd_bytes,");
     const char *metrics[] = {"pay", "fwd_pay", "bwd_pay", "hdr", "fwd_hdr", "bwd_hdr", "iat", "fwd_iat", "bwd_iat", "active", "idle", "win"};
     for(int i=0; i<12; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
@@ -200,11 +183,14 @@ void *worker_fn(void *arg) {
     const char *h_sets[] = {"t_pay", "f_pay", "b_pay"};
     for(int i=0; i<3; i++) for(int j=0; j<HIST_BINS; j++) fprintf(w->out_f, "hist_%s_bin%d,", h_sets[i], j);
     fprintf(w->out_f, "payload_entropy,icmp_type,icmp_code,dns_ans_count,tcp_flags,ttl,dns_query_cnt,dns_ans_total,dns_ratio,al_u1,al_u2,al_u3,al_u4,al_u5\n");
-
     w->s_buf = malloc(IO_BUFFER_SIZE); w->s_off = 0;
     w->flow_table = calloc(FLOW_HASH_SIZE, sizeof(struct flow_state));
     w->rb = ring_buffer__new(w->rb_fd, handle_event, w, NULL);
-    while (!exiting) ring_buffer__poll(w->rb, 100);
+    while (!exiting) {
+        ring_buffer__poll(w->rb, 100);
+        static uint32_t scan_idx = 0; uint64_t now = get_nstime();
+        for (int i=0; i<1000; i++) { scan_idx = (scan_idx + 1) % FLOW_HASH_SIZE; if (w->flow_table[scan_idx].active && (now - w->flow_table[scan_idx].t_last > IDLE_TIMEOUT_NS)) { flush_flow(w, &w->flow_table[scan_idx], now); w->flow_table[scan_idx].active = 0; } }
+    }
     if (w->s_off > 0) fwrite(w->s_buf, 1, w->s_off, w->out_f);
     fclose(w->out_f); free(w->s_buf); free(w->flow_table); ring_buffer__free(w->rb);
     return NULL;
@@ -220,11 +206,10 @@ int main(int argc, char **argv) {
     if (!obj || bpf_object__load(obj)) return 1;
     int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
     for (int i = 0; i < num_workers; i++) {
-        workers[i].id = i;
-        workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
+        workers[i].id = i; workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (399 Non-Redundant Features v2.3)\n", num_workers);
+    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Flow-Level Paradigm Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
