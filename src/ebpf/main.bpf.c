@@ -79,14 +79,18 @@ struct {
 } flow_registry SEC(".maps");
 
 /**
- * @brief Core-Private RingBuffer Map.
- * @details Array of file descriptors used to route telemetry to core-pinned workers.
+ * @brief Core-Private RingBuffer Map-in-Map.
+ * @details Array of RingBuffer pointers to ensure absolute core-private isolation.
  */
 struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1); /**< Placeholder: Dynamically resized in loader.c based on CPU count */
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, 256); 
     __type(key, uint32_t);
-    __type(value, int);
+    __type(value, uint32_t); 
+    __array(values, struct {
+        __uint(type, BPF_MAP_TYPE_RINGBUF);
+        __uint(max_entries, 32 * 1024 * 1024);
+    });
 } pkt_ringbuf_map SEC(".maps");
 
 /**
@@ -218,10 +222,10 @@ int xdp_prog(struct xdp_md *ctx) {
 
     /* Core-Private Telemetry Dispatch */
     uint32_t cpu = bpf_get_smp_processor_id();
-    int *rb_fd = bpf_map_lookup_elem(&pkt_ringbuf_map, &cpu);
-    if (!rb_fd) return XDP_PASS;
+    void *rb = bpf_map_lookup_elem(&pkt_ringbuf_map, &cpu);
+    if (!rb) return XDP_PASS;
 
-    struct packet_event_t *ev = bpf_ringbuf_reserve((void *)(long)*rb_fd, sizeof(*ev), 0);
+    struct packet_event_t *ev = bpf_ringbuf_reserve(rb, sizeof(*ev), 0);
     if (ev) {
         __builtin_memcpy(&ev->key, &key, sizeof(key)); if (meta) __builtin_memcpy(&ev->meta, meta, sizeof(*meta));
         ev->payload_len = (data_end - data) - h_len - sizeof(struct ethhdr);

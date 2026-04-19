@@ -292,33 +292,20 @@ void *worker_fn(void *arg) {
  * to ensure absolute scalability. Instantiates core-private RingBuffers 
  * and attaches XDP programs to the specified interfaces.
  */
-int main(int argc, char **argv) {
-    libbpf_set_print(libbpf_print_fn);
-    fprintf(stderr, "[DEBUG] Starting Lynceus Loader...\n");
-    if (argc < 2) { fprintf(stderr, "❌ Usage: %s <iface>\n", argv[0]); return 1; }
-    struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; 
-    if (setrlimit(RLIMIT_MEMLOCK, &r)) { fprintf(stderr, "❌ Failed to set RLIMIT_MEMLOCK\n"); }
-    signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
-    fprintf(stderr, "[DEBUG] Creating telemetry directory...\n");
-    mkdir("worker_telemetry", 0777);
-    int cores = sysconf(_SC_NPROCESSORS_ONLN); 
-    fprintf(stderr, "[DEBUG] Detected %d cores\n", cores);
-    num_workers = cores;
-    workers = calloc(num_workers, sizeof(struct worker_t));
-    fprintf(stderr, "[DEBUG] Opening BPF object...\n");
-    struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
-    if (!obj) { fprintf(stderr, "❌ Failed to open eBPF object file: %s\n", strerror(errno)); return 1; }
-    
     struct bpf_map *rb_map = bpf_object__find_map_by_name(obj, "pkt_ringbuf_map");
-    if (rb_map) {
-        fprintf(stderr, "[DEBUG] Resizing RingBuffer map to %d entries\n", cores);
-        bpf_map__set_max_entries(rb_map, cores);
-    }
-    
+    if (!rb_map) { fprintf(stderr, "❌ Failed to find telemetry map\n"); return 1; }
+
+    /* Create inner map template for ARRAY_OF_MAPS validation */
+    int inner_template_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
+    if (inner_template_fd < 0) { fprintf(stderr, "❌ Failed to create inner template\n"); return 1; }
+
+    bpf_map__set_inner_map_fd(rb_map, inner_template_fd);
+    bpf_map__set_max_entries(rb_map, num_workers);
+
     fprintf(stderr, "[DEBUG] Loading BPF object into kernel...\n");
     if (bpf_object__load(obj)) { fprintf(stderr, "❌ Failed to load eBPF object into kernel\n"); return 1; }
+    
     int outer_fd = bpf_map__fd(rb_map);
-    fprintf(stderr, "[DEBUG] Map FD: %d\n", outer_fd);
     for (int i = 0; i < num_workers; i++) {
         workers[i].id = i; 
         workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
@@ -338,5 +325,6 @@ int main(int argc, char **argv) {
         if (bpf_program__attach_xdp(p, ifindex) < 0) { fprintf(stderr, "❌ Failed to attach XDP to %s\n", argv[i]); return 1; }
     }
     for (int i = 0; i < num_workers; i++) pthread_join(workers[i].thread, NULL);
+    close(inner_template_fd);
     bpf_object__close(obj); return 0;
 }
