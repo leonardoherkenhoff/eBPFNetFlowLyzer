@@ -1,44 +1,40 @@
-<p align="center">
-  <img src="assets/logo.png" width="200" alt="Lynceus Logo">
-</p>
+# 🛡️ Lynceus
 
-# 🛡️ Lynceus v2.0
-
-**Massively Parallel eBPF Flow Extraction Engine for IPv4/IPv6.**
+**High-Performance eBPF/XDP Telemetry Engine for Research and Security Infrastructure.**
 
 ---
 
 ## 📌 Overview
 
-**Lynceus** is a state-of-the-art network telemetry engine designed for high-resolution flow extraction in dynamic N-Core environments. Leveraging eBPF/XDP and a **Massively Parallel Shared-Nothing Architecture**, it provides high-fidelity data for network observability, security analysis, and autonomous infrastructure.
+**Lynceus** is a professional-grade network telemetry engine designed for high-resolution flow extraction at wire-speed. Leveraging a **Shared-Nothing Parallel Architecture** and eBPF/XDP, it provides a non-redundant matrix of 399 features, including advanced statistical moments and deep protocol introspection.
 
-The name is inspired by **Lynceus**, the Argonaut possessing legendary vision. In Greek mythology, Lynceus was capable of seeing through any physical barrier. This serves as the perfect metaphor for this engine's mission: utilizing eBPF/XDP to provide deep introspection into kernel-space network flows, exposing features that are invisible to traditional observation methods.
+The project is designed for high-throughput environments (e.g., Xeon-based clusters), providing zero-loss data ingestion and granular temporal resolution for network observability and security research.
 
 ---
 
 ## 🚀 Key Features
 
-*   **Elastic N-Core Scalability**: Automatically detects host topology and instantiates a dynamic **Map-in-Map** structure for lockless, core-private ingestion.
-*   **Zero-Contention Partitioned I/O**: Decentralized multi-threaded persistence where each CPU core writes to its own isolated stream, bypassing global filesystem locks.
-*   **High-Fidelity Statistical Suite**: Numerically stable $O(1)$ calculation of 4th-order moments (Mean, Variance, Skewness, Kurtosis) using Welford's Algorithm.
-*   **Protocol Introspection**: High-fidelity dissection for **IPv4/IPv6**, **TCP** (flags/window), **UDP**, **ICMP/ICMPv6** (type/code), and **DNS** (answer counts). Supports multi-layer encapsulation (**VLAN 802.1Q/ad**).
-*   **Payload Hinting**: Extracts the first **64 bytes** of the payload for any protocol, enabling user-space entropy and L7 drift analysis.
+*   **Massively Parallel Shared-Nothing Architecture**: One isolated worker thread per CPU core with local flow tables, eliminating cache contention and mutex bottlenecks.
+*   **Ultimate Protocol Dissection**:
+    *   **L3/L4**: Full Dual-Stack (**IPv4/IPv6**), **TCP** (Flag/Window tracking), **UDP**, **ICMP/ICMPv6** (with Echo ID granularity), **SCTP**, and **IGMP**.
+    *   **Tunneling**: Native recursive decapsulation for **GRE** and **VXLAN**.
+    *   **Encapsulation**: Iterative traversal for **VLAN** and **QinQ (802.1Q/ad)**.
+*   **Scientific Statistical Engine**:
+    *   **399 Non-Redundant Features**: Unified matrix based on NTLFlowLyzer and ALFlowLyzer specifications.
+    *   **Welford's Algorithm**: Numerically stable $O(1)$ calculation of the first four statistical moments (Mean, Variance, Skewness, Kurtosis).
+    *   **192-Bin Payload Histograms**: High-resolution distribution analysis of packet sizes.
+*   **Maximum Granularity**: State-driven flushing (FIN/RST) combined with **Segmented Flow Export** (100-packet micro-batches) for precise temporal analysis of floods.
+*   **L7 Telemetry Hints**: Payload entropy (Shannon) and DNS query/answer tracking.
 
 ---
 
 ## 🏛️ System Architecture
 
 ### 1. Data Plane (Kernel Space)
-XDP-based interceptor implementing atomic 5-tuple normalization and bidirectional flow correlation. Telemetry is routed via SMP-Processor ID to core-specific RingBuffers.
+XDP-based interceptor implementing atomic 5-tuple normalization, iterative encapsulation traversal, and recursive tunnel decapsulation. Telemetry events are routed to core-private RingBuffers via SMP affinity.
 
 ### 2. Control Plane (User Space)
-A decentralized C-Daemon utilizing **Shared-Nothing Workers**. Each worker manages its own flow tables and statistical accumulators, persisting data via high-velocity Partitioned I/O.
-
----
-
-## 🎓 Etymology & Concept
-
-The name is inspired by **Lynceus**, the Argonaut possessing legendary vision. In Greek mythology, Lynceus was capable of seeing through any physical barrier—be it earth, stone, or deep water. This serves as the perfect metaphor for this engine's mission: utilizing eBPF/XDP to provide deep, "X-ray" introspection into kernel-space network flows, exposing features that are invisible to traditional observation methods.
+Multi-threaded C daemon utilizing NUMA-aware workers. Each worker performs real-time statistical aggregation using Welford's algorithm and persists data via high-velocity **Partitioned I/O**.
 
 ---
 
@@ -46,24 +42,37 @@ The name is inspired by **Lynceus**, the Argonaut possessing legendary vision. I
 
 ### Prerequisites
 - Linux Kernel 5.15+
-- `clang`, `llvm`, `libbpf`
+- `clang`, `llvm`, `libbpf-dev`
+- `make`
 
 ### Compilation
 ```bash
-make clean && make all
+make clean && make -j$(nproc)
 ```
 
 ### Execution
 ```bash
-sudo ./build/loader <interface_name>
+sudo ./build/loader <interface_name> [additional_interfaces...]
 ```
+Telemetry will be generated in the `worker_telemetry/` directory, partitioned by CPU core.
+
+---
+
+## 📜 Scientific Formalism
+
+The engine utilizes Welford's Algorithm for online calculation of moments:
+
+$$M_1 = \bar{x}_n = \bar{x}_{n-1} + \frac{x_n - \bar{x}_{n-1}}{n}$$
+$$M_2 = M_2 + (x_n - \bar{x}_{n-1})(x_n - \bar{x}_n)$$
+
+This ensures that the precision of 4th-order moments (Skewness and Kurtosis) is maintained even at multi-Gbps traffic levels.
 
 ---
 
 ## ⚖️ License
 
 Distributed under the **GNU General Public License v2.0**.
-Designed for high-performance network analysis and community-driven security research.
+Designed for high-fidelity network analysis and community-driven security research.
 
 ---
 **Lynceus: Precise Vision, Absolute Integrity.**
