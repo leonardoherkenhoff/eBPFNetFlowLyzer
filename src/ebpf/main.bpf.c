@@ -1,16 +1,17 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - Universal Research Extractor (v1.9.1).
+ * @brief eBPF Data Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.7).
  * 
  * @details 
- * Este programa opera na camada XDP (Express Data Path) para extração stateless 
- * de telemetria bidirecional. 
+ * Arquitetura massivamente paralela via Dynamic Map-in-Map RingBuffers.
+ * Elimina a contenção global ao prover um canal de telemetria privado por CPU.
  * 
- * Formalismo de Fluxo:
- * - Chave ($\mathcal{K}$): $\mathcal{K} = \{IP_{src}, IP_{dst}, P_{src}, P_{dst}, Prot\}$
- * - Normalização: $\mathcal{K}_{norm} = \min(\mathcal{K}_{fwd}, \mathcal{K}_{rev})$
+ * Estratégia de Captura:
+ * 1. O programa detecta o core local via bpf_get_smp_processor_id().
+ * 2. Recupera o RingBuffer privado do core no mapa ARRAY_OF_MAPS.
+ * 3. Exporta eventos atômicos sem interdependência entre cores.
  * 
- * @version 1.9.1 (Milestone 3 Pre-v2.0)
+ * @version 1.9.7 (Dynamic NUMA-Ready)
  */
 
 #include "vmlinux.h"
@@ -20,33 +21,22 @@
 
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
-#define MAX_FLOWS 100000
+#define MAX_FLOWS 200000
 #define PAYLOAD_HINT_SIZE 64
+#define MAX_CPUS 256
 
-/**
- * @struct flow_key
- * @brief Unique identifier for a network flow (5-tuple).
- */
 struct flow_key {
     __u8 src_ip[16]; __u8 dst_ip[16];
     __u16 src_port; __u16 dst_port;
     __u8 protocol;
 } __attribute__((packed));
 
-/**
- * @struct flow_meta
- * @brief Persistent state for a flow, initialized on the first packet.
- */
 struct flow_meta {
     __u64 start_time;
     __u8 ip_ver; __u16 eth_proto;
     __u8 src_mac[6]; __u8 dst_mac[6];
 } __attribute__((packed));
 
-/**
- * @struct packet_event_t
- * @brief Telemetry exported to user-space for every packet.
- */
 struct packet_event_t {
     struct flow_key key;
     struct flow_meta meta;
@@ -58,9 +48,6 @@ struct packet_event_t {
     __u8 payload_hint[PAYLOAD_HINT_SIZE];
 } __attribute__((packed));
 
-/**
- * @brief flow_registry: Stores flow metadata indexed by 5-tuple.
- */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_FLOWS);
@@ -68,13 +55,19 @@ struct {
     __type(value, struct flow_meta);
 } flow_registry SEC(".maps");
 
-/**
- * @brief pkt_ringbuf: High-speed channel to export events to the loader.
- */
-struct {
+/* Inner Map Template for RingBuffer */
+struct inner_map {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1024 * 1024 * 1024); /* 1GB Backpressure Buffer for Xeon */
-} pkt_ringbuf SEC(".maps");
+    __uint(max_entries, 32 * 1024 * 1024); /* 32MB per core */
+} inner_rb SEC(".maps");
+
+/* Outer Map: Array of RingBuffers (one per CPU) */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, MAX_CPUS);
+    __type(key, __u32);
+    __array(values, struct inner_map);
+} pkt_ringbuf_map SEC(".maps");
 
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
@@ -86,9 +79,6 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    /* --- VLAN Traversal (802.1Q / 802.1ad) ---
-     * Iteratively skips VLAN tags to reach the actual L3 header.
-     */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
@@ -103,7 +93,6 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 header_len = 0, window = 0;
     void *l4_hdr = NULL;
 
-    /* --- L3 Dissection (IPv4/IPv6) --- */
     if (eth_proto == ETH_P_IP) {
         struct iphdr *ip = l3_hdr; if ((void *)(ip + 1) > data_end) return XDP_PASS;
         ip_ver = 4; l4_proto = ip->protocol;
@@ -118,7 +107,6 @@ int xdp_prog(struct xdp_md *ctx) {
 
     key.protocol = l4_proto;
 
-    /* --- L4 Dissection (TCP/UDP) --- */
     if (l4_proto == 6) { /* TCP */
         struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) <= data_end) {
             key.src_port = tcp->source; key.dst_port = tcp->dest;
@@ -131,10 +119,6 @@ int xdp_prog(struct xdp_md *ctx) {
         }
     }
 
-    /* --- Bidirectional Flow Registry ---
-     * Normalizes the flow key (5-tuple) to ensure packets from both directions 
-     * map to the same entry in the registry.
-     */
     struct flow_meta *meta = bpf_map_lookup_elem(&flow_registry, &key);
     __u8 is_fwd = 1;
     if (!meta) {
@@ -144,7 +128,6 @@ int xdp_prog(struct xdp_md *ctx) {
         if (meta) { is_fwd = 0; __builtin_memcpy(&key, &rk, sizeof(key)); }
     }
 
-    /* Initialize metadata for new flows */
     if (!meta) {
         struct flow_meta new_m = {0}; new_m.start_time = bpf_ktime_get_ns();
         new_m.ip_ver = ip_ver; new_m.eth_proto = eth_proto;
@@ -153,26 +136,24 @@ int xdp_prog(struct xdp_md *ctx) {
         meta = bpf_map_lookup_elem(&flow_registry, &key);
     }
 
-    /* --- Telemetry Export ---
-     * Reserves space in the RingBuffer and copies packet data for user-space processing.
-     */
-    struct packet_event_t *ev = bpf_ringbuf_reserve(&pkt_ringbuf, sizeof(*ev), 0);
-    if (ev) {
-        __builtin_memcpy(&ev->key, &key, sizeof(key)); if (meta) __builtin_memcpy(&ev->meta, meta, sizeof(*meta));
-        ev->payload_len = (data_end - data) - header_len; ev->header_len = header_len;
-        ev->window_size = window; ev->tcp_flags = tcp_flags; ev->ttl = ttl;
-        ev->is_fwd = is_fwd; ev->timestamp_ns = bpf_ktime_get_ns();
-        
-        /* L7 Hint: Export first 64 bytes of payload for Entropy/DNS analysis */
-        void *payload = data + header_len + sizeof(struct ethhdr);
-        if (payload + PAYLOAD_HINT_SIZE <= data_end) __builtin_memcpy(ev->payload_hint, payload, PAYLOAD_HINT_SIZE);
-        
-        bpf_ringbuf_submit(ev, 0);
+    /* dynamic telemetry routing: lookup per-cpu ringbuffer */
+    __u32 cpu_id = bpf_get_smp_processor_id();
+    void *rb = bpf_map_lookup_elem(&pkt_ringbuf_map, &cpu_id);
+    if (rb) {
+        struct packet_event_t *ev = bpf_ringbuf_reserve(rb, sizeof(*ev), 0);
+        if (ev) {
+            __builtin_memcpy(&ev->key, &key, sizeof(key)); if (meta) __builtin_memcpy(&ev->meta, meta, sizeof(*meta));
+            ev->payload_len = (data_end - data) - header_len; ev->header_len = header_len;
+            ev->window_size = window; ev->tcp_flags = tcp_flags; ev->ttl = ttl;
+            ev->is_fwd = is_fwd; ev->timestamp_ns = bpf_ktime_get_ns();
+            
+            void *payload = data + header_len + sizeof(struct ethhdr);
+            if (payload + PAYLOAD_HINT_SIZE <= data_end) __builtin_memcpy(ev->payload_hint, payload, PAYLOAD_HINT_SIZE);
+            bpf_ringbuf_submit(ev, 0);
+        }
     }
 
-    /* Cleanup flow state on FIN/RST to free map space */
     if (tcp_flags & 0x05) bpf_map_delete_elem(&flow_registry, &key);
-    
     return XDP_PASS;
 }
 

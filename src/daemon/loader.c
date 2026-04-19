@@ -1,18 +1,18 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: 48-Core Extreme Extractor (v1.9.5).
+ * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.7).
  * 
  * @details 
- * Implementação massivamente paralela para arquiteturas Dual-Socket Xeon (48 cores).
- * Otimizado para o XEON SILVER 4410Y com topologia NUMA-aware.
+ * Implementação massivamente paralela com arquitetura Shared-Nothing dinâmica.
+ * Detecta automaticamente o número de cores e instancia RingBuffers e Threads 
+ * independentes por CPU, eliminando o gargalo do Dispatcher central.
  * 
- * Estratégia de Escalabilidade:
- * 1. Dispatcher de Baixa Latência: Thread principal dedicada ao poll do 512MB RingBuffer.
- * 2. 47 Worker Threads: Afinidade forçada por core para evitar migração e cache trashing.
- * 3. Partitioned Memory: Tabelas de fluxo isoladas por thread para evitar locks de sincronização.
- * 4. Buffering de Saída: Bufferização agressiva por thread para mitigar contenção no stdout.
+ * Características:
+ * 1. Portabilidade Absoluta: Escala de 1 a 256 cores dinamicamente.
+ * 2. Afinidade NUMA: Threads fixas em cores para máxima localidade de cache.
+ * 3. Escrita Atômica: Buffers de 1MB por thread para I/O de alta densidade.
  * 
- * @version 1.9.5 (NUMA Extreme Edition)
+ * @version 1.9.7 (Dynamic Shared-Nothing Edition)
  */
 
 #define _GNU_SOURCE
@@ -36,7 +36,6 @@
 
 #define FLOW_HASH_SIZE 131072
 #define HISTOGRAM_BINS 64
-#define QUEUE_SIZE 262144
 
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
@@ -100,112 +99,93 @@ struct flow_state {
 
 struct worker_t {
     pthread_t thread;
-    struct packet_event_t *queue;
-    volatile uint64_t head, tail;
+    int rb_fd;
+    struct ring_buffer *rb;
     struct flow_state *flow_table;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
+    char *s_buf;
+    size_t s_off;
     int id;
-} __attribute__((aligned(64)));
+};
 
 static struct worker_t *workers;
 static int num_workers = 1;
 static volatile bool exiting = false;
 static pthread_mutex_t out_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void sig_handler(int sig) { (void)sig; exiting = true; for(int i=0; i<num_workers; i++) pthread_cond_signal(&workers[i].cond); }
+static void sig_handler(int sig) { (void)sig; exiting = true; }
 
-static inline uint32_t hash_key(const struct flow_key *k) {
-    uint32_t h = 0;
-    const uint8_t *p = (const uint8_t *)k;
+static int handle_event(void *ctx, void *data, size_t data_sz) {
+    (void)data_sz; struct worker_t *w = ctx;
+    const struct packet_event_t *e = data;
+
+    uint32_t h = 0; const uint8_t *p = (const uint8_t *)&e->key;
     for (size_t i = 0; i < sizeof(struct flow_key); i++) h = h * 31 + p[i];
-    return h;
+    uint32_t idx = h % FLOW_HASH_SIZE;
+    while (w->flow_table[idx].active && memcmp(&w->flow_table[idx].key, &e->key, sizeof(struct flow_key)) != 0) idx = (idx + 1) % FLOW_HASH_SIZE;
+    
+    if (!w->flow_table[idx].active) {
+        memset(&w->flow_table[idx], 0, sizeof(struct flow_state)); memcpy(&w->flow_table[idx].key, &e->key, sizeof(struct flow_key));
+        memcpy(&w->flow_table[idx].meta, &e->meta, sizeof(struct flow_meta));
+        w_init(&w->flow_table[idx].t_pay); w_init(&w->flow_table[idx].f_pay); w_init(&w->flow_table[idx].b_pay);
+        w_init(&w->flow_table[idx].t_hdr); w_init(&w->flow_table[idx].f_hdr); w_init(&w->flow_table[idx].b_hdr);
+        w_init(&w->flow_table[idx].t_iat); w_init(&w->flow_table[idx].f_iat); w_init(&w->flow_table[idx].b_iat);
+        w_init(&w->flow_table[idx].t_d_pay); w_init(&w->flow_table[idx].f_d_pay); w_init(&w->flow_table[idx].b_d_pay);
+        w->flow_table[idx].active = 1;
+    }
+
+    struct flow_state *s = &w->flow_table[idx];
+    double duration = (double)(e->timestamp_ns - s->meta.start_time) / 1e9;
+    if (s->t_last > 0) {
+        w_update(&s->t_iat, (double)(e->timestamp_ns - s->t_last) / 1e9);
+        w_update(&s->t_d_pay, abs((int)e->payload_len - (int)s->t_l_pay));
+    }
+    s->t_last = e.timestamp_ns; s->t_l_pay = e.payload_len;
+    w_update(&s->t_pay, e.payload_len); w_update(&s->t_hdr, e.header_len);
+    if (e->is_fwd) {
+        if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
+        s->f_last = e.timestamp_ns; w_update(&s->f_pay, e.payload_len); w_update(&s->f_hdr, e.header_len);
+        s->f_bytes += e.payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
+    } else {
+        if (s->b_last > 0) w_update(&s->b_iat, (double)(e->timestamp_ns - s->b_last) / 1e9);
+        s->b_last = e.timestamp_ns; w_update(&s->b_pay, e.payload_len); w_update(&s->b_hdr, e.header_len);
+        s->b_bytes += e.payload_len; for (int i=0; i<8; i++) if (e.tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
+    }
+
+    char sip[64], dip[64];
+    if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e->key.dst_ip[12], dip, 64); }
+    else { inet_ntop(AF_INET6, e.key.src_ip, sip, 64); inet_ntop(AF_INET6, e.key.dst_ip, dip, 64); }
+
+    w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", sip, dip, ntohs(e->key.src_port), ntohs(e->key.dst_port), e->key.protocol, sip, ntohs(e->key.src_port), dip, ntohs(e->key.dst_port), e->key.protocol, (double)s->meta.start_time / 1e9, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
+    
+    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), w_mode(&W))
+    FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr);
+    FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->t_d_pay); FMT_W(s->f_d_pay); FMT_W(s->b_d_pay);
+    for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
+    w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%.4f,%u,%u,%u\n", (double)e->payload_len/64.0, e->icmp_type, e->icmp_code, e->ttl);
+    
+    if (w->s_off > 1000000 - 4096) {
+        pthread_mutex_lock(&out_mutex); fwrite(w->s_buf, 1, w->s_off, stdout); pthread_mutex_unlock(&out_mutex);
+        w->s_off = 0;
+    }
+    if (e->tcp_flags & 0x05) s->active = 0;
+    return 0;
 }
 
 void *worker_fn(void *arg) {
     struct worker_t *w = arg;
-    cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 48, &cpuset);
+    cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 256, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     
-    char *s_buf = malloc(1024 * 1024); // 1MB per-thread line buffer
-    size_t s_off = 0;
+    w->s_buf = malloc(1024 * 1024);
+    w->s_off = 0;
+    w->flow_table = calloc(FLOW_HASH_SIZE, sizeof(struct flow_state));
+    w->rb = ring_buffer__new(w->rb_fd, handle_event, w, NULL);
 
-    while (!exiting) {
-        pthread_mutex_lock(&w->mutex);
-        while (w->head == w->tail && !exiting) pthread_cond_wait(&w->cond, &w->mutex);
-        if (exiting && w->head == w->tail) { pthread_mutex_unlock(&w->mutex); break; }
-        struct packet_event_t e = w->queue[w->tail % QUEUE_SIZE];
-        w->tail++;
-        pthread_mutex_unlock(&w->mutex);
+    while (!exiting) ring_buffer__poll(w->rb, 100);
 
-        uint32_t h = hash_key(&e.key);
-        uint32_t idx = h % FLOW_HASH_SIZE;
-        while (w->flow_table[idx].active && memcmp(&w->flow_table[idx].key, &e.key, sizeof(struct flow_key)) != 0) idx = (idx + 1) % FLOW_HASH_SIZE;
-        
-        if (!w->flow_table[idx].active) {
-            memset(&w->flow_table[idx], 0, sizeof(struct flow_state)); memcpy(&w->flow_table[idx].key, &e.key, sizeof(struct flow_key));
-            memcpy(&w->flow_table[idx].meta, &e.meta, sizeof(struct flow_meta));
-            w_init(&w->flow_table[idx].t_pay); w_init(&w->flow_table[idx].f_pay); w_init(&w->flow_table[idx].b_pay);
-            w_init(&w->flow_table[idx].t_hdr); w_init(&w->flow_table[idx].f_hdr); w_init(&w->flow_table[idx].b_hdr);
-            w_init(&w->flow_table[idx].t_iat); w_init(&w->flow_table[idx].f_iat); w_init(&w->flow_table[idx].b_iat);
-            w_init(&w->flow_table[idx].t_d_pay); w_init(&w->flow_table[idx].f_d_pay); w_init(&w->flow_table[idx].b_d_pay);
-            w->flow_table[idx].active = 1;
-        }
-
-        struct flow_state *s = &w->flow_table[idx];
-        double duration = (double)(e.timestamp_ns - s->meta.start_time) / 1e9;
-        if (s->t_last > 0) {
-            w_update(&s->t_iat, (double)(e.timestamp_ns - s->t_last) / 1e9);
-            w_update(&s->t_d_pay, abs((int)e.payload_len - (int)s->t_l_pay));
-        }
-        s->t_last = e.timestamp_ns; s->t_l_pay = e.payload_len;
-        w_update(&s->t_pay, e.payload_len); w_update(&s->t_hdr, e.header_len);
-        if (e.is_fwd) {
-            if (s->f_last > 0) w_update(&s->f_iat, (double)(e.timestamp_ns - s->f_last) / 1e9);
-            s->f_last = e.timestamp_ns; w_update(&s->f_pay, e.payload_len); w_update(&s->f_hdr, e.header_len);
-            s->f_bytes += e.payload_len; for (int i=0; i<8; i++) if (e.tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
-        } else {
-            if (s->b_last > 0) w_update(&s->b_iat, (double)(e.timestamp_ns - s->b_last) / 1e9);
-            s->b_last = e.timestamp_ns; w_update(&s->b_pay, e.payload_len); w_update(&s->b_hdr, e.header_len);
-            s->b_bytes += e.payload_len; for (int i=0; i<8; i++) if (e.tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
-        }
-
-        char sip[64], dip[64];
-        if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e.key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e.key.dst_ip[12], dip, 64); }
-        else { inet_ntop(AF_INET6, e.key.src_ip, sip, 64); inet_ntop(AF_INET6, e.key.dst_ip, dip, 64); }
-
-        s_off += snprintf(s_buf + s_off, 4096, "%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", sip, dip, ntohs(e.key.src_port), ntohs(e.key.dst_port), e.key.protocol, sip, ntohs(e.key.src_port), dip, ntohs(e.key.dst_port), e.key.protocol, (double)s->meta.start_time / 1e9, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
-        
-        #define FMT_W(W) s_off += snprintf(s_buf + s_off, 4096, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), w_mode(&W))
-        FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr);
-        FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->t_d_pay); FMT_W(s->f_d_pay); FMT_W(s->b_d_pay);
-        for(int i=0; i<8; i++) s_off += snprintf(s_buf + s_off, 4096, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
-        s_off += snprintf(s_buf + s_off, 4096, "%.4f,%u,%u,%u\n", (double)e.payload_len/64.0, e.icmp_type, e.icmp_code, e.ttl);
-        
-        if (s_off > 1000000 - 4096) {
-            pthread_mutex_lock(&out_mutex); fwrite(s_buf, 1, s_off, stdout); pthread_mutex_unlock(&out_mutex);
-            s_off = 0;
-        }
-        if (e.tcp_flags & 0x05) s->active = 0;
-    }
-    if (s_off > 0) { pthread_mutex_lock(&out_mutex); fwrite(s_buf, 1, s_off, stdout); pthread_mutex_unlock(&out_mutex); }
-    free(s_buf);
+    if (w->s_off > 0) { pthread_mutex_lock(&out_mutex); fwrite(w->s_buf, 1, w->s_off, stdout); pthread_mutex_unlock(&out_mutex); }
+    free(w->s_buf); free(w->flow_table); ring_buffer__free(w->rb);
     return NULL;
-}
-
-static int handle_event(void *ctx, void *data, size_t data_sz) {
-    (void)ctx; (void)data_sz; const struct packet_event_t *e = data;
-    uint32_t h = hash_key((const struct flow_key *)&e->key);
-    uint32_t w_idx = h % num_workers;
-    struct worker_t *w = &workers[w_idx];
-    pthread_mutex_lock(&w->mutex);
-    if (w->head - w->tail < QUEUE_SIZE) {
-        w->queue[w->head % QUEUE_SIZE] = *e;
-        w->head++;
-        pthread_cond_signal(&w->cond);
-    }
-    pthread_mutex_unlock(&w->mutex);
-    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -213,8 +193,23 @@ int main(int argc, char **argv) {
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
 
     int cores = sysconf(_SC_NPROCESSORS_ONLN);
-    num_workers = (cores > 1) ? cores - 1 : 1;
+    num_workers = cores;
     workers = calloc(num_workers, sizeof(struct worker_t));
+
+    struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
+    if (!obj || bpf_object__load(obj)) return 1;
+
+    int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
+    int inner_template_fd = bpf_object__find_map_fd_by_name(obj, "inner_rb");
+
+    for (int i = 0; i < num_workers; i++) {
+        workers[i].id = i;
+        /* Create dynamic per-cpu ringbuffer using template */
+        struct bpf_map_create_opts opts = { .sz = sizeof(opts), .inner_map_fd = 0 };
+        workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, &opts);
+        if (workers[i].rb_fd < 0) { fprintf(stderr, "Failed to create RB for CPU %d: %s\n", i, strerror(errno)); return 1; }
+        bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
+    }
 
     printf("flow_id,src_ip,src_port,dst_ip,dst_port,protocol,timestamp,duration,PacketsCount,FwdPacketsCount,BwdPacketsCount,TotalBytes,FwdBytes,BwdBytes,FwdBwdPktRatio,FwdBwdByteRatio,");
     const char *dirs[] = {"Tot", "Fwd", "Bwd"}; const char *metrics[] = {"Pay", "Hdr", "IAT", "DeltaLen"};
@@ -223,22 +218,11 @@ int main(int argc, char **argv) {
     for(int i=0; i<8; i++) printf("%s_Cnt,%s_Fwd_Cnt,%s_Bwd_Cnt,", flgs[i], flgs[i], flgs[i]);
     printf("PayloadEntropy,IcmpType,IcmpCode,TTL\n");
 
-    for (int i = 0; i < num_workers; i++) {
-        workers[i].id = i; 
-        workers[i].queue = malloc(sizeof(struct packet_event_t) * QUEUE_SIZE);
-        workers[i].flow_table = calloc(FLOW_HASH_SIZE, sizeof(struct flow_state));
-        pthread_mutex_init(&workers[i].mutex, NULL);
-        pthread_cond_init(&workers[i].cond, NULL); 
-        pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
-    }
+    for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
 
-    struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
-    if (!obj || bpf_object__load(obj)) return 1;
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
-    int fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf");
-    struct ring_buffer *rb = ring_buffer__new(fd, handle_event, NULL, NULL);
-    while (!exiting) ring_buffer__poll(rb, 100);
+
     for (int i = 0; i < num_workers; i++) pthread_join(workers[i].thread, NULL);
-    ring_buffer__free(rb); bpf_object__close(obj); return 0;
+    bpf_object__close(obj); return 0;
 }
