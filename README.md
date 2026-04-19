@@ -6,18 +6,18 @@
 
 ## 📌 Overview
 
-**eBPFNetFlowLyzer** is a state-of-the-art network traffic feature extractor engineered for extreme high-throughput environments (48+ cores) and high-fidelity security research. By leveraging a **Massively Parallel Shared-Nothing Architecture**, it achieves linear scalability on multi-socket NUMA systems, making it the definitive tool for building real-time autonomous systems (**MAPE-K Loops**).
+**eBPFNetFlowLyzer** is a state-of-the-art network traffic feature extractor engineered for **Dynamic N-Core environments** and high-fidelity security research. By leveraging a **Massively Parallel Shared-Nothing Architecture**, it achieves linear scalability on multi-socket NUMA systems, making it the definitive tool for building real-time autonomous systems (**MAPE-K Loops**).
 
-The system integrates a **Full Statistical Moments Engine** ($\mu, \sigma^2, \gamma, \kappa$) and a decentralized I/O pipeline to ensure **Absolute Capture Integrity** (zero-loss) even under multi-gigabit DDoS volumetric conditions.
+The system automatically probes the host hardware at runtime, instantiating independent extraction pipelines for every available CPU core. This ensures **Absolute Capture Integrity** (zero-loss) even under multi-gigabit DDoS volumetric conditions.
 
 ---
 
 ## 🚀 Key Features (v1.9.10)
 
-*   **Massively Parallel Shared-Nothing Core**: Eliminates lock contention via dynamic **Map-in-Map (BPF_MAP_TYPE_ARRAY_OF_MAPS)** architecture, providing independent telemetry channels per CPU core.
-*   **Zero-Contention Partitioned I/O**: High-performance multi-threaded output engine where each core writes to its own isolated telemetry stream, bypasssing global filesystem locks.
+*   **Elastic N-Core Scalability**: Automatically detects system topology via `sysconf` and instantiates a dynamic **Map-in-Map (BPF_MAP_TYPE_ARRAY_OF_MAPS)** structure, providing private telemetry channels per core.
+*   **Zero-Contention Partitioned I/O**: High-performance multi-threaded output engine where each core writes to its own isolated telemetry stream, bypasssing global filesystem locks and mutex contention.
 *   **Scientific Statistical Suite (400+ Features)**: Numerically stable $O(1)$ calculation of 4th-order moments using Welford's Algorithm.
-*   **NUMA-Aware Orchestration**: Real-time hardware topology detection and CPU affinity pinning to maximize cache locality on high-end Xeon/EPYC servers.
+*   **NUMA-Aware Orchestration**: Real-time CPU affinity pinning (`pthread_setaffinity_np`) to maximize cache locality and minimize cross-socket latency.
 *   **Full IPv6 & VLAN Support**: Transparent dissection of encapsulated and multi-stack traffic without performance degradation.
 *   **Entropy-Based L7 Fingerprinting**: Real-time Shannon Entropy calculation ($H(x)$) for identification of randomized/encrypted malicious payloads.
 
@@ -29,11 +29,11 @@ The system integrates a **Full Statistical Moments Engine** ($\mu, \sigma^2, \ga
 XDP-based interceptor implementing the **Stateful Monitoring** phase. It performs:
 - Atomic 5-tuple normalization.
 - Bidirectional flow correlation.
-- SMP-Processor ID based telemetry routing to private RingBuffers.
+- SMP-Processor ID based telemetry routing to core-specific RingBuffers.
 
 ### 2. Control Plane (User Space)
 A decentralized C-Daemon responsible for the **Analyze** phase of the MAPE-K loop:
-- **Shared-Nothing Workers**: One thread per CPU core, pinned via `pthread_setaffinity_np`.
+- **Shared-Nothing Workers**: One thread per CPU core, dynamically spawned based on host capacity.
 - **Stateless Aggregation**: Each worker manages its own flow table and statistical accumulators.
 - **High-Velocity Persistence**: Partitioned I/O writing to `worker_telemetry/` with 2MB internal buffering.
 
@@ -76,10 +76,11 @@ mkdir -p data/raw data/interim/EBPF_RAW data/processed/EBPF
 sudo python3 scripts/analysis/ebpf_full_experiment.py
 ```
 
-### 📉 Performance Metrics (Xeon Silver 4410Y - 48 Cores)
+### 📉 Testbed Case Study (Xeon Silver 4410Y - 48 Cores)
 - **Ingestion Fidelity**: 100% (33M+ packets tested with zero drops).
-- **Memory Footprint**: Linear $O(N)$ with flow table size (~3GB for 200k active flows).
-- **I/O Throughput**: 2.5GB/s+ (partitioned writing to NVMe).
+- **Architecture Adaptability**: The system dynamically scaled to all 48 threads without manual configuration.
+- **Memory Footprint**: ~3GB for 200k active flows.
+- **I/O Throughput**: 2.5GB/s+ (sustained partitioned writing).
 
 ---
 
