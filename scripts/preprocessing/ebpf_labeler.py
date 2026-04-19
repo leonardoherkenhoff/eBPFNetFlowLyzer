@@ -1,45 +1,52 @@
-"""
-eBPFNetFlowLyzer Topological Labeler
------------------------------------
-This script performs post-processing on the extracted network features by applying 
-Ground Truth labels based on the network topology of the testbed.
-
-Labeling Logic:
-- Topological Attribution: Identifies flows as 'ATTACK' or 'BENIGN' based on 
-  the source IP address of the attacker nodes in the research testbed.
-- Supervised Learning Readiness: Produces the final dataset required for 
-  training and evaluating Machine Learning models (e.g., Random Forest, SVM).
-
-Implementation Details:
-- Memory Efficiency: Uses pandas chunking (CHUNK_SIZE) to handle large 
-  extraction files (5GB+) without exceeding RAM limits.
-- Hierarchical Output: Maintains the same directory structure as the 
-  extraction phase for easier dataset management.
-
-Developed as part of the Master's Degree in Applied Computing research.
-"""
+#!/usr/bin/env python3
+/**
+ * @file ebpf_labeler.py
+ * @brief Research Post-Processing - Topological Ground Truth Attribution.
+ * 
+ * Research Objective:
+ * This script transforms raw network features into a supervised dataset by 
+ * applying ground truth labels based on the testbed's network topology.
+ * 
+ * Labeling Framework:
+ * - Deterministic Attribution: Flows originating from known attacker nodes 
+ *   are labeled with the specific attack category (e.g., 'DrDoS_DNS').
+ * - Class Balancing: All other traffic is labeled as 'BENIGN'.
+ * 
+ * Methodology:
+ * Uses high-performance pandas chunking to process multi-gigabyte CSV 
+ * extractions without exhausting system memory.
+ */
 
 import pandas as pd
 import numpy as np
 import os
 import glob
 
-# --- CONFIGURATION ---
-INPUT_DIR = "./data/interim/EBPF_RAW"
-OUTPUT_DIR = "./data/processed/EBPF"
-# Target Attacker IPs (Support for both IPv4 and IPv6)
-# Update these based on your specific testbed topology
+# --- Research Configuration ---
+BASE_DIR = "/opt/eBPFNetFlowLyzer"
+INPUT_DIR = os.path.join(BASE_DIR, "data/interim/EBPF_RAW")
+OUTPUT_DIR = os.path.join(BASE_DIR, "data/processed/EBPF")
+
+# Target Attacker Nodes (Research Testbed IPs)
+# Must include both IPv4 and IPv6 stack for Milestone 3 compliance.
 ATTACKER_IPS = ["172.16.0.5", "2001:db8:acad:10::5", "fe80::215:5dff:fe00:5"] 
-CHUNK_SIZE = 500_000 
+CHUNK_SIZE = 500000 
 
 def process_file_auto(file_path):
     """
-    Applies the labeling rule to a single CSV file.
+    Applies the topological labeling rule to a single extraction result.
+    
+    Args:
+        file_path (str): Path to the raw CSV extraction file.
+        
+    Returns:
+        bool: True if processed successfully, False otherwise.
     """
     try:
         filename = os.path.basename(file_path)
         attack_category = os.path.basename(os.path.dirname(file_path))
         
+        # Maintain hierarchical directory structure for dataset integrity
         rel_path = os.path.relpath(os.path.dirname(file_path), INPUT_DIR)
         output_dir = os.path.join(OUTPUT_DIR, rel_path)
         os.makedirs(output_dir, exist_ok=True)
@@ -56,32 +63,35 @@ def process_file_auto(file_path):
         total_benign = 0
         unique_ips = set()
 
+        # Stream-based processing to handle large-scale datasets
         for chunk in reader:
             data = chunk.copy()
             
-            # Record unique IPs for debugging if needed
+            # Forensic diagnostics: track a sample of observed IPs
             if len(unique_ips) < 20:
                 unique_ips.update(data['src_ip'].unique()[:20])
 
-            # Labeling Logic:
-            # Matches against the list of known attacker IPs
+            # Ground Truth Mapping
             src_ips = data['src_ip'].astype(str)
             is_attack = src_ips.isin(ATTACKER_IPS)
             
+            # Apply labels: Attack Category vs Benign
             labels = np.where(is_attack, attack_category, 'BENIGN')
             data['Label'] = labels
             
             total_attack += np.sum(is_attack)
             total_benign += np.sum(~is_attack)
             
+            # Append results to the final processed dataset
             data.to_csv(output_file, mode='a', header=first_chunk, index=False)
             first_chunk = False
             
         print(f"    ✅ Created: {os.path.basename(output_file)}")
         print(f"       -> Attack: {total_attack} | Benign: {total_benign}")
+        
         if total_attack == 0:
-            print(f"       ⚠️  WARNING: Zero attack flows found. Check ATTACKER_IPS.")
-            print(f"       Sample IPs found: {list(unique_ips)[:5]}")
+            print(f"       ⚠️  WARNING: Zero attack flows found. Verify ATTACKER_IPS mapping.")
+            print(f"       Forensic IPs detected: {list(unique_ips)[:5]}")
 
         return True
     except Exception as e:
@@ -89,6 +99,7 @@ def process_file_auto(file_path):
         return False
 
 def main():
+    """Main execution loop for dataset labeling."""
     print("=== eBPFNetFlowLyzer Research Pre-processing (Labeling) ===")
     files = glob.glob(os.path.join(INPUT_DIR, "**", "*.csv"), recursive=True)
     
@@ -97,6 +108,7 @@ def main():
         return
 
     for f in files:
+        # Ignore diagnostic resource metric logs during labeling
         if os.path.basename(f).startswith("resource_metrics"): continue
         process_file_auto(f)
 

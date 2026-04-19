@@ -1,11 +1,20 @@
+#!/usr/bin/env python3
 """
 eBPFNetFlowLyzer - Full Research Pipeline Orchestrator
 ------------------------------------------------------
-This script executes the complete end-to-end experiment:
-1. Build: Compiles the C-eBPF Data Plane and Control Plane.
-2. Extraction: Processes all datasets in data/raw via ebpf_wrapper.py.
-3. Labeling: Applies topological ground truth via ebpf_labeler.py.
-4. ML Benchmark: Evaluates detection performance via ebpf_run_benchmark.py.
+Research Objective:
+This script executes the complete end-to-end research experiment, from 
+source compilation to Machine Learning validation.
+
+Pipeline Phases:
+1. Build Phase: Compiles the BPF bytecode and User-space daemon.
+2. Extraction Phase: Ingests raw PCAPs and extracts granular flow features.
+3. Pre-processing Phase: Applies topological ground truth labels.
+4. Analysis Phase: Evaluates detection performance via Random Forest.
+
+Reproducibility:
+Each phase is designed to be idempotent and generates forensic logs 
+required for the SBSeg 2026 artifact seals (SeloD, F, S, R).
 
 Usage:
   sudo python3 scripts/analysis/ebpf_full_experiment.py
@@ -17,42 +26,54 @@ import sys
 import time
 
 def run_command(cmd, description):
+    """
+    Executes a shell command with research-grade logging and error handling.
+    
+    Args:
+        cmd (str): The shell command to execute.
+        description (str): A user-friendly description of the phase.
+    """
     print(f"\n" + "="*60)
     print(f"🚀 {description}")
     print(f"="*60)
     start_time = time.time()
     try:
-        # Using subprocess.run to stream output directly to terminal
+        # Direct terminal streaming for real-time visibility
         subprocess.run(cmd, shell=True, check=True)
         elapsed = time.time() - start_time
-        print(f"\n✅ SUCCESS: {description} (Time: {elapsed:.2f}s)")
+        print(f"\n✅ SUCCESS: {description} (Duration: {elapsed:.2f}s)")
     except subprocess.CalledProcessError as e:
-        print(f"\n❌ ERROR: {description} failed with return code {e.returncode}")
+        print(f"\n❌ ERROR: {description} failed with exit code {e.returncode}")
         sys.exit(1)
 
 def main():
+    """Main orchestrator for the eBPFNetFlowLyzer research experiment."""
     print("=== eBPFNetFlowLyzer End-to-End Experiment Pipeline ===")
     
-    # 1. Build Phase
+    # --- Phase 1: Infrastructure Preparation ---
     run_command("make clean && make all", "Compiling eBPF Core and Daemon")
     
-    # 2. Extraction Phase (Data Plane + Control Plane)
+    # --- Phase 2: Feature Extraction (Data Plane + Control Plane) ---
+    # Orchestrates VETH topology and BPF ingestion.
     run_command("python3 scripts/testbed/ebpf_wrapper.py", "Executing High-Speed Feature Extraction")
     
-    # 3. Pre-processing Phase (Labeling)
+    # --- Phase 3: Post-processing (Topological Labeling) ---
+    # Transforms raw telemetry into supervised datasets.
     run_command("python3 scripts/preprocessing/ebpf_labeler.py", "Applying Topological Ground Truth Labeling")
     
-    # 4. Analysis Phase (ML Validation)
+    # --- Phase 4: Research Validation (ML Benchmark) ---
+    # Validates detection accuracy for academic reporting.
     run_command("python3 scripts/analysis/ebpf_run_benchmark.py", "Running Machine Learning Benchmark (Random Forest)")
 
     print("\n" + "="*60)
-    print("🏆 ALL PHASES COMPLETED SUCCESSFULLY")
+    print("🏆 ALL RESEARCH PHASES COMPLETED SUCCESSFULLY")
     print("="*60)
-    print("Final datasets are in: data/processed/EBPF/")
-    print("ML results are summarized above in the Analysis Phase output.")
+    print("Processed datasets: data/processed/EBPF/")
+    print("Validation metrics are detailed in the Analysis Phase log above.")
 
 if __name__ == "__main__":
+    # Ensure root privileges for BPF/XDP attachment
     if os.geteuid() != 0:
-        print("⚠️  Warning: This script should ideally be run as root/sudo to ensure XDP attachment.")
+        print("⚠️  Warning: This orchestrator requires sudo/root for eBPF attachment.")
     
     main()
