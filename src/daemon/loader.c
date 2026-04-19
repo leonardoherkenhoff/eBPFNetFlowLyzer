@@ -1,18 +1,12 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.7).
+ * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.8).
  * 
  * @details 
  * Implementação massivamente paralela com arquitetura Shared-Nothing dinâmica.
- * Detecta automaticamente o número de cores e instancia RingBuffers e Threads 
- * independentes por CPU, eliminando o gargalo do Dispatcher central.
+ * Corrigido para compatibilidade com ponteiros de evento e criação de mapas legados.
  * 
- * Características:
- * 1. Portabilidade Absoluta: Escala de 1 a 256 cores dinamicamente.
- * 2. Afinidade NUMA: Threads fixas em cores para máxima localidade de cache.
- * 3. Escrita Atômica: Buffers de 1MB por thread para I/O de alta densidade.
- * 
- * @version 1.9.7 (Dynamic Shared-Nothing Edition)
+ * @version 1.9.8 (Dynamic Shared-Nothing Robust Edition)
  */
 
 #define _GNU_SOURCE
@@ -139,21 +133,21 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
         w_update(&s->t_iat, (double)(e->timestamp_ns - s->t_last) / 1e9);
         w_update(&s->t_d_pay, abs((int)e->payload_len - (int)s->t_l_pay));
     }
-    s->t_last = e.timestamp_ns; s->t_l_pay = e.payload_len;
-    w_update(&s->t_pay, e.payload_len); w_update(&s->t_hdr, e.header_len);
+    s->t_last = e->timestamp_ns; s->t_l_pay = e->payload_len;
+    w_update(&s->t_pay, e->payload_len); w_update(&s->t_hdr, e->header_len);
     if (e->is_fwd) {
         if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
-        s->f_last = e.timestamp_ns; w_update(&s->f_pay, e.payload_len); w_update(&s->f_hdr, e.header_len);
-        s->f_bytes += e.payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
+        s->f_last = e->timestamp_ns; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
+        s->f_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
     } else {
         if (s->b_last > 0) w_update(&s->b_iat, (double)(e->timestamp_ns - s->b_last) / 1e9);
-        s->b_last = e.timestamp_ns; w_update(&s->b_pay, e.payload_len); w_update(&s->b_hdr, e.header_len);
-        s->b_bytes += e.payload_len; for (int i=0; i<8; i++) if (e.tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
+        s->b_last = e->timestamp_ns; w_update(&s->b_pay, e->payload_len); w_update(&s->b_hdr, e->header_len);
+        s->b_bytes += e->payload_len; for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
     }
 
     char sip[64], dip[64];
     if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e->key.dst_ip[12], dip, 64); }
-    else { inet_ntop(AF_INET6, e.key.src_ip, sip, 64); inet_ntop(AF_INET6, e.key.dst_ip, dip, 64); }
+    else { inet_ntop(AF_INET6, e->key.src_ip, sip, 64); inet_ntop(AF_INET6, e->key.dst_ip, dip, 64); }
 
     w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", sip, dip, ntohs(e->key.src_port), ntohs(e->key.dst_port), e->key.protocol, sip, ntohs(e->key.src_port), dip, ntohs(e->key.dst_port), e->key.protocol, (double)s->meta.start_time / 1e9, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
     
@@ -200,13 +194,11 @@ int main(int argc, char **argv) {
     if (!obj || bpf_object__load(obj)) return 1;
 
     int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
-    int inner_template_fd = bpf_object__find_map_fd_by_name(obj, "inner_rb");
 
     for (int i = 0; i < num_workers; i++) {
         workers[i].id = i;
-        /* Create dynamic per-cpu ringbuffer using template */
-        struct bpf_map_create_opts opts = { .sz = sizeof(opts), .inner_map_fd = 0 };
-        workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, &opts);
+        /* Use bpf_create_map for legacy compatibility with older libbpf */
+        workers[i].rb_fd = bpf_create_map(BPF_MAP_TYPE_RINGBUF, 0, 0, 32 * 1024 * 1024, 0);
         if (workers[i].rb_fd < 0) { fprintf(stderr, "Failed to create RB for CPU %d: %s\n", i, strerror(errno)); return 1; }
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
