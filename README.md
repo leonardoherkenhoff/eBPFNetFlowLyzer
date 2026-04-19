@@ -6,35 +6,36 @@
 
 ## 📌 Visão Geral
 
-**Lynceus** é um motor de telemetria de rede de nível profissional projetado para extração de características em fluxo (Flow-Level Feature Extraction) em velocidade de linha. Utilizando uma **Arquitetura Paralela Shared-Nothing** e eBPF/XDP, ele fornece uma matriz não-redundante de 399 características, incluindo momentos estatísticos avançados e dissecção profunda de protocolos.
+**Lynceus** é um motor de telemetria de rede de nível profissional projetado para extração de características em fluxo (Flow-Level Feature Extraction) em velocidade de linha. Utilizando uma **Arquitetura Paralela Shared-Nothing** e eBPF/XDP, ele fornece uma matriz não-redundante de **399 características**, incluindo momentos estatísticos avançados e dissecção profunda de protocolos.
 
-O projeto é **agnóstico a hardware**, realizando a detecção dinâmica da topologia de CPU do host para instanciar workers e RingBuffers isolados para cada núcleo disponível.
+O projeto é **totalmente agnóstico a hardware**, realizando a detecção dinâmica da topologia de CPU do host (via SMP/NUMA detection) para instanciar workers e RingBuffers eBPF isolados para cada núcleo físico disponível.
 
 ---
 
 ## 🚀 Principais Características
 
-*   **Escalabilidade Dinâmica de Topologia**: Detecção automática de cores via `sysconf` para paralelismo Massivamente Shared-Nothing, eliminando contenção de cache e gargalos de mutex.
-*   **Dissecção Protocolar de Extrema Fidelidade**:
-    *   **L3/L4**: Full Dual-Stack (**IPv4/IPv6**), **TCP** (Flags/Window), **UDP**, **ICMP/ICMPv6** (com granularidade de Echo ID), **SCTP** e **IGMP**.
+*   **Escalabilidade Dinâmica de Topologia**: Detecção automática de cores via `sysconf` para paralelismo massivo, eliminando contenção de cache L1/L2 e gargalos de sincronização global.
+*   **Dissecção Protocolar de Alta Fidelidade**:
+    *   **L3/L4**: Full Dual-Stack (**IPv4/IPv6**), **TCP** (RFC 793 - Flags/Window), **UDP** (RFC 768), **ICMP/ICMPv6** (RFC 792/4443 com granularidade de Echo ID), **SCTP** e **IGMP**.
     *   **Tunelamento**: Decapsulamento recursivo nativo para **GRE** e **VXLAN**.
-    *   **Encapsulamento**: Traversal iterativo para **VLAN** e **QinQ (802.1Q/ad)**.
+    *   **Encapsulamento**: Traversal iterativo para **VLAN** e **QinQ (802.1Q/802.1ad)**.
 *   **Motor Estatístico Científico**:
-    *   **399 Features Não-Redundantes**: Matriz unificada baseada nas especificações NTLFlowLyzer e ALFlowLyzer.
-    *   **Algoritmo de Welford**: Cálculo numericamente estável de momentos estatísticos de 4ª ordem (Média, Variância, Assimetria, Curtose) em $O(1)$.
-    *   **Histogramas de Payload**: 192 bins para análise de distribuição de tamanho.
-*   **Granularidade Micro-Temporal**: Exportação orientada a eventos (FIN/RST) combinada com **Segmentação de Fluxo** a cada 100 pacotes.
-*   **Inteligência L7**: Entropia de payload (Shannon) e tracking de queries/respostas DNS.
+    *   **399 Features Não-Redundantes**: Matriz unificada integrando NTLFlowLyzer e ALFlowLyzer.
+    *   **Algoritmo de Welford**: Cálculo numericamente estável de momentos estatísticos de 4ª ordem em $O(1)$.
+        $$\Delta = x - M_1, \quad M_1 = M_1 + \frac{\Delta}{n}$$
+    *   **Histogramas de Payload**: 240 bins (80 por conjunto) com resolução de 20 bytes para análise de micro-assinaturas.
+*   **Granularidade Micro-Temporal**: Segmentação de fluxo a cada **100 pacotes** ($N=100$) para análise de séries temporais de alta fidelidade.
+*   **Inteligência L7**: Entropia de Shannon para payload e metadados de DNS (RFC 1035).
 
 ---
 
 ## 🏛️ Arquitetura do Sistema
 
 ### 1. Data Plane (Kernel Space)
-Interceptor baseado em XDP que implementa normalização atômica de 5-tuple, traversal de encapsulamento e decapsulamento de túneis. Eventos de telemetria são roteados para RingBuffers privados por núcleo via SMP affinity.
+Interceptor eBPF/XDP que implementa normalização atômica de 5-tuple e decapsulamento recursivo. Eventos de telemetria são roteados para RingBuffers privados por núcleo via **SMP Processor ID**.
 
 ### 2. Control Plane (User Space)
-Daemon multithreaded em C utilizando workers isolados. Cada worker realiza agregação estatística em tempo real e persiste dados via **I/O Particionado** de alta velocidade, garantindo zero-contenção entre threads.
+Daemon C multithreaded com afinidade de CPU estrita. Cada worker processa seu próprio stream de eventos e persiste dados via **I/O Particionado** (Zero-Contention CSV writing), garantindo escalabilidade linear com o número de cores.
 
 ---
 
@@ -45,16 +46,15 @@ Daemon multithreaded em C utilizando workers isolados. Cada worker realiza agreg
 - `clang`, `llvm`, `libbpf-dev`
 - `make`
 
-### Compilação
+### Compilação e Execução
 ```bash
+# Compilação paralela otimizada
 make clean && make -j$(nproc)
-```
 
-### Execução
-```bash
-sudo ./build/loader <interface_name> [additional_interfaces...]
+# Execução (Direcionada a interfaces específicas)
+sudo ./build/loader <interface_name>
 ```
-A telemetria será gerada no diretório `worker_telemetry/`, particionada por núcleo de CPU detectado.
+Os dados são exportados em `worker_telemetry/cpu_%d.csv`, prontos para ingestão direta por pipelines de **Deep Learning**.
 
 ---
 
