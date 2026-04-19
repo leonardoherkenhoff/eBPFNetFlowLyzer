@@ -1,13 +1,13 @@
-# Makefile - eBPFNetFlowLyzer (Senior Research Suite)
+# Makefile - eBPFNetFlowLyzer (High-Resolution Research Suite)
 # -----------------------------------------------------------------------------
-# Research Objective: High-performance eBPF-based Network Feature Extraction.
-# This Makefile orchestrates the compilation of the Kernel-Space Data Plane 
-# (XDP) and the User-Space Control Plane (Daemon).
+# Research Objective: Stateless Packet-Level Network Feature Extraction.
+# This Makefile orchestrates the compilation of the v1.5.0 pipeline, 
+# supporting high-entropy telemetry for academic DDoS benchmarks.
 #
 # Requirements:
 # - Clang/LLVM 10+ (BPF Target)
 # - libbpf-dev, libelf-dev, zlib1g-dev
-# - Linux Kernel 5.15+ (BTF Support)
+# - Linux Kernel 5.15+ (XDP/RingBuffer Support)
 # -----------------------------------------------------------------------------
 
 CLANG ?= clang

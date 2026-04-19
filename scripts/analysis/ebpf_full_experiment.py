@@ -4,13 +4,13 @@ eBPFNetFlowLyzer - Full Research Pipeline Orchestrator
 ------------------------------------------------------
 Research Objective:
 This script executes the complete end-to-end research experiment, from 
-source compilation to Machine Learning validation.
+source compilation to Machine Learning validation (v1.5.0).
 
 Pipeline Phases:
 1. Build Phase: Compiles the BPF bytecode and User-space daemon.
-2. Extraction Phase: Ingests raw PCAPs and extracts granular flow features.
-3. Pre-processing Phase: Applies topological ground truth labels.
-4. Analysis Phase: Evaluates detection performance via Random Forest.
+2. Extraction Phase: Ingests raw PCAPs and extracts stateless packet-level features.
+3. Pre-processing Phase: Applies topological ground truth labels to atomic events.
+4. Analysis Phase: Evaluates detection performance via Random Forest on high-entropy data.
 
 Reproducibility:
 Each phase is designed to be idempotent and generates forensic logs 
@@ -54,8 +54,8 @@ def main():
     run_command("make clean && make all", "Compiling eBPF Core and Daemon")
     
     # --- Phase 2: Feature Extraction (Data Plane + Control Plane) ---
-    # Orchestrates VETH topology and BPF ingestion.
-    run_command("python3 scripts/testbed/ebpf_wrapper.py", "Executing High-Speed Feature Extraction")
+    # Orchestrates VETH topology and stateless BPF ingestion.
+    run_command("python3 scripts/testbed/ebpf_wrapper.py", "Executing High-Resolution Feature Extraction")
     
     # --- Phase 3: Post-processing (Topological Labeling) ---
     # Transforms raw telemetry into supervised datasets.

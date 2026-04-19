@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-/**
- * @file ebpf_labeler.py
- * @brief Research Post-Processing - Topological Ground Truth Attribution.
- * 
- * Research Objective:
- * This script transforms raw network features into a supervised dataset by 
- * applying ground truth labels based on the testbed's network topology.
- * 
- * Labeling Framework:
- * - Deterministic Attribution: Flows originating from known attacker nodes 
- *   are labeled with the specific attack category (e.g., 'DrDoS_DNS').
- * - Class Balancing: All other traffic is labeled as 'BENIGN'.
- * 
- * Methodology:
- * Uses high-performance pandas chunking to process multi-gigabyte CSV 
- * extractions without exhausting system memory.
- */
+"""
+ebpf_labeler.py - Research Post-Processing - Topological Ground Truth Attribution.
+
+Research Objective:
+This script transforms raw network features into a supervised dataset by 
+applying ground truth labels based on the testbed's network topology.
+
+Labeling Framework:
+- Deterministic Attribution: Packets originating from known attacker nodes 
+  are labeled with the specific attack category (e.g., 'DrDoS_DNS').
+- Class Balancing: All other traffic is labeled as 'BENIGN'.
+
+Methodology:
+Uses high-performance pandas chunking to process multi-gigabyte packet-level 
+extractions (v1.5.0) without exhausting system memory.
+"""
 
 import pandas as pd
 import numpy as np
@@ -68,19 +67,20 @@ def process_file_auto(file_path):
             data = chunk.copy()
             
             # Forensic diagnostics: track a sample of observed IPs
-            if len(unique_ips) < 20:
-                unique_ips.update(data['src_ip'].unique()[:20])
+            if 'src_ip' in data.columns:
+                if len(unique_ips) < 20:
+                    unique_ips.update(data['src_ip'].unique()[:20])
 
-            # Ground Truth Mapping
-            src_ips = data['src_ip'].astype(str)
-            is_attack = src_ips.isin(ATTACKER_IPS)
-            
-            # Apply labels: Attack Category vs Benign
-            labels = np.where(is_attack, attack_category, 'BENIGN')
-            data['Label'] = labels
-            
-            total_attack += np.sum(is_attack)
-            total_benign += np.sum(~is_attack)
+                # Ground Truth Mapping
+                src_ips = data['src_ip'].astype(str)
+                is_attack = src_ips.isin(ATTACKER_IPS)
+                
+                # Apply labels: Attack Category vs Benign
+                labels = np.where(is_attack, attack_category, 'BENIGN')
+                data['Label'] = labels
+                
+                total_attack += np.sum(is_attack)
+                total_benign += np.sum(~is_attack)
             
             # Append results to the final processed dataset
             data.to_csv(output_file, mode='a', header=first_chunk, index=False)
@@ -90,7 +90,7 @@ def process_file_auto(file_path):
         print(f"       -> Attack: {total_attack} | Benign: {total_benign}")
         
         if total_attack == 0:
-            print(f"       ⚠️  WARNING: Zero attack flows found. Verify ATTACKER_IPS mapping.")
+            print(f"       ⚠️  WARNING: Zero attack events found. Verify ATTACKER_IPS mapping.")
             print(f"       Forensic IPs detected: {list(unique_ips)[:5]}")
 
         return True

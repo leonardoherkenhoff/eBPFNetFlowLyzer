@@ -1,13 +1,19 @@
 /**
  * @file loader.c
- * @brief Control Plane Daemon - High-Speed Stateless Telemetry Orchestrator.
+ * @brief User-Space Control Plane - Stateless Telemetry Orchestrator.
  * 
- * Version: 1.5.0
+ * @details 
+ * Manages the lifecycle of the eBPF Data Plane and provides a high-throughput 
+ * bridge between the kernel RingBuffer and the research CSV storage. 
+ * Optimized for stateless packet-level traces where every event is exported 
+ * without aggregation to preserve temporal entropy for Machine Learning models.
  * 
- * Research Objective:
- * Transforms eBPF ringbuffer events into a high-resolution CSV stream.
- * Every packet is treated as an atomic research sample, preserving the full 
- * temporal and protocol entropy of the capture for academic benchmarking.
+ * Performance Considerations:
+ * - Uses Libbpf RingBuffer API for lockless event consumption.
+ * - Redirects diagnostic forensics to stderr to prevent CSV header pollution.
+ * - Supports multi-interface attachment for topological visibility.
+ * 
+ * @version 1.5.0
  */
 
 #include <stdio.h>

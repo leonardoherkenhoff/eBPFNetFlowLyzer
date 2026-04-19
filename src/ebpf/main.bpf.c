@@ -1,16 +1,20 @@
 /**
  * @file main.bpf.c
- * @brief Data Plane Core - eBPF/XDP High-Resolution Packet-Level Extractor.
+ * @brief eBPF Data Plane - High-Resolution Stateless Packet Extractor.
  * 
- * Research Objective:
- * Implements a stateless, high-resolution telemetry pipeline that exports 
- * every packet as a distinct research sample (one line per packet/flow), 
- * fulfilling the requirement for granular, non-aggregated dataset extraction.
+ * @details 
+ * Implements a non-aggregated network telemetry pipeline using XDP. Unlike 
+ * traditional NetFlow-style extractors that aggregate packets into flows, 
+ * this implementation treats every packet as a discrete research sample.
  * 
- * Features:
- * - 100% EtherType Visibility: Captures ALL traffic (ARP, LLDP, STP, etc.).
- * - Protocol-Agnostic L3/L4: Deep-parsing for IP, best-effort for others.
- * - Zero Aggregation: No kernel-side flow resume; preserves per-packet entropy.
+ * Architecture:
+ * 1. L2 Dissection: Full visibility into EtherTypes (ARP, IPv4, IPv6, LLDP, etc.).
+ * 2. L3/L4 Parsing: Recursive traversal of IPv6 Extension Headers and deep 
+ *    inspection of TCP/UDP/ICMP fields.
+ * 3. RingBuffer Submission: High-speed export of atomic packet events to 
+ *    user-space without kernel-side state maintenance.
+ * 
+ * Target: High-entropy DDoS benchmark datasets (SBSeg 2026).
  * 
  * @version 1.5.0
  */

@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
-/**
- * @file ebpf_run_benchmark.py
- * @brief Research Analysis - Machine Learning Validation & Performance Evaluation.
- * 
- * Research Objective:
- * This script performs the final validation of the eBPF feature extraction 
- * pipeline by training and evaluating Machine Learning models to detect DDoS 
- * attack vectors.
- * 
- * Model Configuration:
- * - Algorithm: Random Forest (RF) with Balanced Class Weights.
- * - Training Protocol: 70/30 stratified train-test split.
- * - Metrics: F1-Score, Precision, Recall, and Feature Importance.
- * 
- * Anti-Leakage Strategy:
- * Automatically drops identifying features (IPs, Ports, Protocols) to ensure 
- * the model learns general network behavior patterns rather than specific 
- * testbed artifacts.
- */
+"""
+ebpf_run_benchmark.py - Machine Learning Validation & Performance Evaluation.
+
+Research Objective:
+This script performs the final validation of the eBPF feature extraction 
+pipeline by training and evaluating Machine Learning models to detect DDoS 
+attack vectors using high-resolution packet-level features (v1.5.0).
+
+Model Configuration:
+- Algorithm: Random Forest (RF) with Balanced Class Weights.
+- Training Protocol: 70/30 stratified train-test split.
+- Metrics: F1-Score, Precision, Recall, and Feature Importance.
+
+Anti-Leakage Strategy:
+Automatically drops identifying features (IPs, MACs, Ports) to ensure 
+the model learns general network behavior patterns rather than specific 
+testbed artifacts.
+"""
 
 import pandas as pd
 import numpy as np
@@ -44,7 +43,7 @@ def process_dataframe(df_chunk):
     Normalizes and prepares the feature set for ML training.
     
     Args:
-        df_chunk (pd.DataFrame): Raw labeled flow features.
+        df_chunk (pd.DataFrame): Raw labeled packet-level features.
         
     Returns:
         tuple: (Features X, Binary Labels y).
@@ -57,7 +56,8 @@ def process_dataframe(df_chunk):
         return None, None
     
     # Feature Engineering: Drop identifying artifacts to prevent over-fitting
-    drop_patterns = ['src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol']
+    # We include MAC addresses in the drop list for v1.5.0 stateless mode.
+    drop_patterns = ['src_ip', 'dst_ip', 'src_port', 'dst_port', 'protocol', 'src_mac', 'dst_mac', 'timestamp_ns']
     cols_to_drop = [c for c in df_chunk.columns if c in drop_patterns] + [target_col]
     
     X = df_chunk.drop(columns=cols_to_drop, errors='ignore')
@@ -97,6 +97,7 @@ def run_analysis():
         
         print(f"\n>>> ANALYZING DATASET: {attack_name} <<<")
         try:
+            # v1.5.0 datasets are large; using low_memory=False
             df = pd.read_csv(file_path, low_memory=False)
             X, y = process_dataframe(df)
             
