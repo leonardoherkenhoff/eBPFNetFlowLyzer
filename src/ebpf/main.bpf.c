@@ -73,7 +73,7 @@ struct {
  */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 512 * 1024 * 1024); /* 512MB Backpressure Buffer for MAPE-K */
+    __uint(max_entries, 1024 * 1024 * 1024); /* 1GB Backpressure Buffer for Xeon */
 } pkt_ringbuf SEC(".maps");
 
 SEC("xdp")
