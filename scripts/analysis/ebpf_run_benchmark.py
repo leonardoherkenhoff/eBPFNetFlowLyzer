@@ -93,15 +93,25 @@ def run_analysis():
 
     for file_path in processed_files:
         attack_name = os.path.basename(file_path).replace('labeled_', '').replace('.csv', '')
-        gc.collect() # Aggressive memory cleanup for large-scale analysis
+        gc.collect() 
         
         print(f"\n>>> ANALYZING DATASET: {attack_name} <<<")
         try:
-            # v1.5.0 datasets are large; using low_memory=False
-            df = pd.read_csv(file_path, low_memory=False)
-            X, y = process_dataframe(df)
+            # v1.9.0 datasets are massive; using chunked ingestion for RAM stability
+            X_list, y_list = [], []
+            reader = pd.read_csv(file_path, chunksize=200000, low_memory=False)
             
-            if X is None or len(y.unique()) < 2: 
+            for chunk in reader:
+                X_chunk, y_chunk = process_dataframe(chunk)
+                if X_chunk is not None:
+                    X_list.append(X_chunk)
+                    y_list.append(y_chunk)
+                if len(X_list) > 10: break # Sample 2M packets for validation speed
+            
+            X = pd.concat(X_list)
+            y = pd.concat(y_list)
+            
+            if len(y.unique()) < 2: 
                 print(f"    ⚠️ Data insufficiency or single-class sample.")
                 continue
                 
