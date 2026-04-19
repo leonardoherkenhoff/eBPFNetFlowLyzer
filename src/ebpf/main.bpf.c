@@ -1,19 +1,22 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - Segmented Statistical Flow Extractor (NTL/AL Hybrid).
+ * @brief eBPF Data Plane - NTL/AL-Compliant High-Resolution Extractor (v1.8.0).
  * 
  * @details 
- * Implements a high-performance flow-based telemetry pipeline that replicates 
- * the feature set of NTLFlowLyzer and ALFlowLyzer. 
+ * Implements a research-grade flow-based telemetry pipeline aligned with 
+ * NTLFlowLyzer and ALFlowLyzer specifications.
  * 
- * Key Mechanisms:
- * 1. Flow Aggregation: Uses a BPF Hash Map to track 5-tuple flow states.
- * 2. Segmented Export: Triggers a telemetry event every 10,000 packets 
- *    or upon flow termination, ensuring granularity for massive DDoS floods.
- * 3. Rich Metrics: Captures IAT, packet lengths, TCP flags, and L7 DNS hints.
- * 4. Forensic Visibility: Includes L2 metadata (EtherType, MACs).
+ * Triggers:
+ * - Event-Driven: Flushes flow statistics on TCP control packets (SYN, FIN, RST).
+ * - Segment-Driven: Flushes statistics every 10,000 packets to ensure 
+ *   granularity in high-speed DDoS flood scenarios.
  * 
- * @version 1.6.0
+ * Features:
+ * - Bidirectional Aggregation (Forward/Backward).
+ * - Statistical Moments: Packet Lengths and IAT (Inter-Arrival Time).
+ * - Application Visibility: DNS Hints (ALFlowLyzer style).
+ * 
+ * @version 1.8.0
  */
 
 #include "vmlinux.h"
@@ -24,7 +27,7 @@
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define MAX_FLOWS 100000
-#define SEGMENT_THRESHOLD 10000 /* Export every 10k packets for granularity */
+#define SEGMENT_THRESHOLD 10000 
 
 struct flow_key {
     __u8 src_ip[16];
@@ -41,6 +44,8 @@ struct flow_info {
     __u64 bwd_pkt_count;
     __u64 fwd_bytes;
     __u64 bwd_bytes;
+    __u64 fwd_bytes_sq; /* For Variance/Std calculation in user-space */
+    __u64 bwd_bytes_sq;
     __u64 fwd_header_len;
     __u64 bwd_header_len;
     __u32 fwd_pkt_len_max;
@@ -54,13 +59,14 @@ struct flow_info {
     __u8 dst_mac[6];
     __u16 window_size;
     __u8 ttl;
+    __u32 dns_query_count;
 } __attribute__((packed));
 
-/** @brief Telemetry event for user-space export. */
 struct flow_event_t {
     struct flow_key key;
     struct flow_info info;
     __u64 timestamp_ns;
+    __u8 event_type; /* 1: SYN, 2: FIN/RST, 3: SEGMENT */
 } __attribute__((packed));
 
 /* --- BPF Maps --- */
@@ -86,12 +92,13 @@ struct {
 
 /* --- Internal Helpers --- */
 
-static __always_inline void export_segment(struct flow_key *key, struct flow_info *info) {
+static __always_inline void export_flow_event(struct flow_key *key, struct flow_info *info, __u8 type) {
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
     if (ev) {
         __builtin_memcpy(&ev->key, key, sizeof(*key));
         __builtin_memcpy(&ev->info, info, sizeof(*info));
         ev->timestamp_ns = bpf_ktime_get_ns();
+        ev->event_type = type;
         bpf_ringbuf_submit(ev, 0);
     }
 }
@@ -127,6 +134,7 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 payload_len = 0, header_len = 0;
     __u8 tcp_flags = 0, ttl = 0;
     __u16 window = 0;
+    __u32 dns_hint = 0;
 
     /* L3 Dissection */
     if (eth_proto == ETH_P_IP) {
@@ -151,9 +159,7 @@ int xdp_prog(struct xdp_md *ctx) {
         l4_hdr = l3_hdr + 40;
         header_len = 40;
         ttl = ip6->hop_limit;
-    } else {
-        return XDP_PASS; /* Non-IP for now, or build pseudo-key */
-    }
+    } else return XDP_PASS;
 
     /* L4 Dissection */
     if (l4_proto == 6) { /* TCP */
@@ -169,6 +175,13 @@ int xdp_prog(struct xdp_md *ctx) {
         if ((void *)(udp + 1) <= data_end) {
             key.src_port = udp->source; key.dst_port = udp->dest;
             header_len += 8;
+            /* ALFlowLyzer DNS Hint */
+            if (bpf_ntohs(udp->source) == 53 || bpf_ntohs(udp->dest) == 53) {
+                void *dns = l4_hdr + 8;
+                if (dns + 6 <= data_end) {
+                    dns_hint = bpf_ntohs(*(__u16 *)(dns + 4)); /* Query Count */
+                }
+            }
         }
     } else if (l4_proto == 1 || l4_proto == 58) { /* ICMP */
         struct { __u8 t; __u8 c; } *ic = l4_hdr;
@@ -179,7 +192,7 @@ int xdp_prog(struct xdp_md *ctx) {
     }
     payload_len = (data_end - data) - header_len;
 
-    /* Flow Aggregation */
+    /* Bidirectional Aggregation */
     struct flow_info *info = bpf_map_lookup_elem(&flow_state_cache, &key);
     __u8 is_fwd = 1;
     if (!info) {
@@ -207,22 +220,27 @@ int xdp_prog(struct xdp_md *ctx) {
     if (info) {
         info->last_time = bpf_ktime_get_ns();
         if (is_fwd) {
-            info->fwd_pkt_count++; info->fwd_bytes += payload_len; info->fwd_header_len += header_len;
+            info->fwd_pkt_count++; info->fwd_bytes += payload_len; info->fwd_bytes_sq += (__u64)payload_len * payload_len;
+            info->fwd_header_len += header_len;
             if (payload_len > info->fwd_pkt_len_max) info->fwd_pkt_len_max = payload_len;
             if (payload_len < info->fwd_pkt_len_min) info->fwd_pkt_len_min = payload_len;
         } else {
-            info->bwd_pkt_count++; info->bwd_bytes += payload_len; info->bwd_header_len += header_len;
+            info->bwd_pkt_count++; info->bwd_bytes += payload_len; info->bwd_bytes_sq += (__u64)payload_len * payload_len;
+            info->bwd_header_len += header_len;
             if (payload_len > info->bwd_pkt_len_max) info->bwd_pkt_len_max = payload_len;
             if (payload_len < info->bwd_pkt_len_min) info->bwd_pkt_len_min = payload_len;
         }
         info->tcp_flags |= tcp_flags; info->window_size = window; info->ttl = ttl;
+        info->dns_query_count += dns_hint;
 
-        /* NTLFlowLyzer Segmented Export Trigger */
-        if (info->fwd_pkt_count + info->bwd_pkt_count >= SEGMENT_THRESHOLD) {
-            export_segment(&key, info);
-            /* Reset stats for next segment but keep base flow info */
+        /* NTL-Style Trigger: SYN (1), FIN/RST (2), Segment (3) */
+        if (tcp_flags & 0x02) export_flow_event(&key, info, 1);
+        else if (tcp_flags & 0x05) { export_flow_event(&key, info, 2); bpf_map_delete_elem(&flow_state_cache, &key); }
+        else if (info->fwd_pkt_count + info->bwd_pkt_count >= SEGMENT_THRESHOLD) {
+            export_flow_event(&key, info, 3);
+            /* Reset stats for segment but keep metadata */
             info->fwd_pkt_count = 0; info->bwd_pkt_count = 0;
-            info->fwd_bytes = 0; info->bwd_bytes = 0;
+            info->fwd_bytes = 0; info->bwd_bytes = 0; info->fwd_bytes_sq = 0; info->bwd_bytes_sq = 0;
             info->start_time = info->last_time;
             info->fwd_pkt_len_max = 0; info->fwd_pkt_len_min = 0xFFFF;
             info->bwd_pkt_len_max = 0; info->bwd_pkt_len_min = 0xFFFF;
