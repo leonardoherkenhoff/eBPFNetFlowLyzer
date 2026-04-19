@@ -295,8 +295,12 @@ int main(int argc, char **argv) {
     workers = calloc(num_workers, sizeof(struct worker_t));
     struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
     if (!obj) { fprintf(stderr, "❌ Failed to open eBPF object file\n"); return 1; }
+    
+    struct bpf_map *rb_map = bpf_object__find_map_by_name(obj, "pkt_ringbuf_map");
+    if (rb_map) bpf_map__set_max_entries(rb_map, cores);
+    
     if (bpf_object__load(obj)) { fprintf(stderr, "❌ Failed to load eBPF object into kernel\n"); return 1; }
-    int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
+    int outer_fd = bpf_map__fd(rb_map);
     for (int i = 0; i < num_workers; i++) {
         workers[i].id = i; 
         workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);

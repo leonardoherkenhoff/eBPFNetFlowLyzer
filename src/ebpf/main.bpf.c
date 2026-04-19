@@ -84,7 +84,7 @@ struct {
  */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 256);
+    __uint(max_entries, 1);
     __type(key, uint32_t);
     __type(value, int);
 } pkt_ringbuf_map SEC(".maps");
