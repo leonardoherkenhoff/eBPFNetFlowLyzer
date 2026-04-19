@@ -5,7 +5,8 @@ Lynceus Research Pipeline - Extraction Wrapper & Testbed Orchestrator (v1.0)
 v1.0 Stable Research Milestone:
 - Engine: Lynceus v2.0 (Massively Parallel eBPF Extractor).
 - "Extract-Label-Purge" Strategy: Integrates labelling and cleanup into the loop.
-- Ensures massive dataset benchmarks fit in production storage partitions.
+- NOTE: Current version uses VETH pairs for simulation. For production 
+  server verification, adjust the 'LOADER_BIN' attachment to the physical NIC.
 """
 
 import subprocess

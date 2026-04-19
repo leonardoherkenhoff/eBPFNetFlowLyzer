@@ -1,67 +1,68 @@
 # 🛡️ Lynceus
 
-**Motor de Extração de Features eBPF/XDP de Alta Performance para Pesquisa e Infraestrutura de Segurança.**
+**High-Performance eBPF/XDP Feature Extraction Engine for Security Research and Infrastructure.**
 
 ---
 
-## 📌 Visão Geral
+## 📌 Overview
 
-**Lynceus** é um motor de telemetria de rede de nível profissional projetado para extração de características em fluxo (Flow-Level Feature Extraction) em velocidade de linha. Utilizando uma **Arquitetura Paralela Shared-Nothing** e eBPF/XDP, ele fornece uma matriz não-redundante de **399 características**, incluindo momentos estatísticos avançados e dissecção profunda de protocolos.
+**Lynceus** is a professional-grade network telemetry engine designed for line-rate, flow-level feature extraction. Leveraging a **Massively Parallel Shared-Nothing Architecture** and eBPF/XDP, it provides a non-redundant matrix of **399 scientific features**, including advanced statistical moments and deep protocol dissection.
 
-O projeto é **totalmente agnóstico a hardware**, realizando a detecção dinâmica da topologia de CPU do host (via SMP/NUMA detection) para instanciar workers e RingBuffers eBPF isolados para cada núcleo físico disponível.
+The project is **hardware-agnostic**, performing dynamic host CPU topology detection (SMP/NUMA) to instantiate isolated workers and core-private RingBuffers eBPF for every available physical core.
 
 ---
 
-## 🚀 Principais Características
+## 🚀 Key Features
 
-*   **Escalabilidade Dinâmica de Topologia**: Detecção automática de cores via `sysconf` para paralelismo massivo, eliminando contenção de cache L1/L2 e gargalos de sincronização global.
-*   **Dissecção Protocolar de Alta Fidelidade**:
-    *   **L3/L4**: Full Dual-Stack (**IPv4/IPv6**), **TCP** (RFC 793 - Flags/Window), **UDP** (RFC 768), **ICMP/ICMPv6** (RFC 792/4443 com granularidade de Echo ID), **SCTP** e **IGMP**.
-    *   **Tunelamento**: Decapsulamento recursivo nativo para **GRE** e **VXLAN**.
-    *   **Encapsulamento**: Traversal iterativo para **VLAN** e **QinQ (802.1Q/802.1ad)**.
-*   **Motor Estatístico Científico**:
-    *   **399 Features Não-Redundantes**: Matriz unificada integrando NTLFlowLyzer e ALFlowLyzer.
-    *   **Algoritmo de Welford**: Cálculo numericamente estável de momentos estatísticos de 4ª ordem em $O(1)$.
+*   **Dynamic Topology Scaling**: Automatic core detection via `sysconf` for massive parallelism, eliminating L1/L2 cache contention and global synchronization bottlenecks.
+*   **High-Fidelity Protocol Dissection**:
+    *   **L3/L4**: Full Dual-Stack (**IPv4/IPv6**), **TCP** (RFC 793 - Flags/Window), **UDP** (RFC 768), **ICMP/ICMPv6** (RFC 792/4443 with Echo ID granularity), **SCTP**, and **IGMP**.
+    *   **Tunneling**: Native recursive decapsulation for **GRE** and **VXLAN**.
+    *   **Encapsulation**: Iterative traversal for **VLAN** and **QinQ (802.1Q/802.1ad)**.
+*   **Scientific Statistical Engine**:
+    *   **399 Non-Redundant Features**: Unified matrix integrating NTLFlowLyzer and ALFlowLyzer specifications.
+    *   **Welford Algorithm**: Numerically stable, $O(1)$ calculation of 4th-order statistical moments.
         $$\Delta = x - M_1, \quad M_1 = M_1 + \frac{\Delta}{n}$$
-    *   **Histogramas de Payload**: 240 bins (80 por conjunto) com resolução de 20 bytes para análise de micro-assinaturas.
-*   **Granularidade Micro-Temporal**: Segmentação de fluxo a cada **100 pacotes** ($N=100$) para análise de séries temporais de alta fidelidade.
-*   **Inteligência L7**: Entropia de Shannon para payload e metadados de DNS (RFC 1035).
+    *   **High-Density Histograms**: 240 bins (80 per set) with 20-byte resolution for micro-signature distribution analysis.
+*   **Micro-Temporal Granularity**: Flow segmentation every **100 packets** ($N=100$) for high-fidelity time-series analysis.
+*   **L7 Intelligence**: Shannon payload entropy and DNS telemetry tracking (RFC 1035).
 
 ---
 
-## 🏛️ Arquitetura do Sistema
+## 🏛️ System Architecture
 
 ### 1. Data Plane (Kernel Space)
-Interceptor eBPF/XDP que implementa normalização atômica de 5-tuple e decapsulamento recursivo. Eventos de telemetria são roteados para RingBuffers privados por núcleo via **SMP Processor ID**.
+eBPF/XDP interceptor implementing atomic 5-tuple normalization and recursive tunnel decapsulation. Telemetry events are routed to core-private RingBuffers via **SMP Processor ID** affinity.
 
 ### 2. Control Plane (User Space)
-Daemon C multithreaded com afinidade de CPU estrita. Cada worker processa seu próprio stream de eventos e persiste dados via **I/O Particionado** (Zero-Contention CSV writing), garantindo escalabilidade linear com o número de cores.
+Multithreaded C daemon with strict CPU pinning. Each worker processes its own event stream and persists data via **Partitioned I/O** (Zero-Contention CSV writing), ensuring linear scalability with core count.
 
 ---
 
-## 🛠️ Build & Uso
+## 🛠️ Build & Usage
 
-### Pré-requisitos
-- Kernel Linux 5.15+
+### Prerequisites
+- Linux Kernel 5.15+
 - `clang`, `llvm`, `libbpf-dev`
 - `make`
 
-### Compilação e Execução
+### Compilation and Execution
 ```bash
-# Compilação paralela otimizada
+# Optimized parallel build
 make clean && make -j$(nproc)
 
-# Execução (Direcionada a interfaces específicas)
+# Execution (Target specific interfaces)
+# IMPORTANT: Adjust interface name for production server (e.g., eth0, ens3)
 sudo ./build/loader <interface_name>
 ```
-Os dados são exportados em `worker_telemetry/cpu_%d.csv`, prontos para ingestão direta por pipelines de **Deep Learning**.
+Telemetry is exported to `worker_telemetry/cpu_%d.csv`, ready for direct ingestion by **Deep Learning** pipelines.
 
 ---
 
-## ⚖️ Licença
+## ⚖️ License
 
-Distribuído sob a **GNU General Public License v2.0**.
-Projetado para análise de rede de alta fidelidade e pesquisa de segurança dirigida pela comunidade.
+Distributed under the **GNU General Public License v2.0**.
+Designed for high-fidelity network analysis and community-driven security research.
 
 ---
-**Lynceus: Visão Precisa, Integridade Absoluta.**
+**Lynceus: Precise Vision, Absolute Integrity.**

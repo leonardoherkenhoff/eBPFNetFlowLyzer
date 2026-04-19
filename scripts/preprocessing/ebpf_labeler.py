@@ -17,6 +17,7 @@ import argparse
 import shutil
 
 # --- Research Configuration ---
+# IMPORTANT: Adjust ATTACKER_IPS to match the production server topology
 BASE_DIR = "/opt/eBPFNetFlowLyzer"
 INPUT_DIR = os.path.join(BASE_DIR, "data/interim/EBPF_RAW")
 OUTPUT_DIR = os.path.join(BASE_DIR, "data/processed/EBPF")
