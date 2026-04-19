@@ -1,19 +1,13 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.8).
+ * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.9).
  * 
  * @details 
- * Orquestrador de telemetria massivamente paralelo com arquitetura Shared-Nothing.
- * Implementa o consumo descentralizado de RingBuffers eBPF, eliminando contenção 
- * global e permitindo escalabilidade linear em sistemas multi-socket (NUMA).
+ * Versão de Alta Fidelidade com Particionamento de I/O Total.
+ * Elimina o Mutex global de escrita, resolvendo o 'freeze' em sistemas 48-core.
+ * Cada core escreve em seu próprio arquivo CSV, garantindo Zero-Contention I/O.
  * 
- * Princípios de Engenharia:
- * 1. Descentralização: Cada CPU core possui sua própria thread e RingBuffer.
- * 2. Afinidade (Pinning): Threads são fixadas aos cores para maximizar localidade de cache.
- * 3. Estatística Incremental: Implementa o Algoritmo de Welford/Pébay para cálculo 
- *    de momentos estatísticos (Média, Var, Skew, Kurt) em $O(1)$.
- * 
- * @version 1.9.8 (Research Milestone 3 - Final)
+ * @version 1.9.9 (High-Fidelity / Partitioned I/O)
  */
 
 #define _GNU_SOURCE
@@ -34,10 +28,11 @@
 #include <math.h>
 #include <pthread.h>
 #include <errno.h>
+#include <sys/stat.h>
 
-/* Configurações de Memória e Escala */
 #define FLOW_HASH_SIZE 131072
 #define HISTOGRAM_BINS 64
+#define IO_BUFFER_SIZE (2 * 1024 * 1024) /* 2MB Buffer for sustained throughput */
 
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
@@ -62,22 +57,12 @@ struct packet_event_t {
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
-/**
- * @struct w_stat
- * @brief Acumulador estatístico baseado no Algoritmo de Welford.
- * Permite computar momentos de alta ordem sem instabilidade numérica.
- */
 struct w_stat {
     uint64_t n; double M1, M2, M3, M4; uint32_t max, min;
     double median; uint32_t hist[HISTOGRAM_BINS];
 };
 
 static void w_init(struct w_stat *w) { memset(w, 0, sizeof(*w)); w->min = 0xFFFFFFFF; }
-
-/**
- * @brief Atualiza os momentos estatísticos com uma nova amostra x.
- * Complexidade Temporal: O(1).
- */
 static inline void w_update(struct w_stat *w, double x) {
     uint64_t n1 = w->n; w->n++;
     double delta = x - w->M1, delta_n = delta / w->n, delta_n2 = delta_n * delta_n, term1 = delta * delta_n * n1;
@@ -90,7 +75,6 @@ static inline void w_update(struct w_stat *w, double x) {
     uint32_t bin = (uint32_t)x / 32; if (bin < HISTOGRAM_BINS) w->hist[bin]++;
 }
 
-/* Funções auxiliares para extração de momentos de alta ordem */
 static inline double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / (w->n - 1)) : 0; }
 static inline double w_var(struct w_stat *w) { return (w->n > 1) ? w->M2 / (w->n - 1) : 0; }
 static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
@@ -101,11 +85,6 @@ static inline uint32_t w_mode(struct w_stat *w) {
     return m_bin * 32;
 }
 
-/**
- * @struct flow_state
- * @brief Estado de fluxo local da thread (Worker).
- * Contém acumuladores para 400+ dimensões de features.
- */
 struct flow_state {
     struct flow_key key; struct flow_meta meta;
     struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat, t_d_pay, f_d_pay, b_d_pay;
@@ -115,42 +94,33 @@ struct flow_state {
     int active;
 };
 
-/**
- * @struct worker_t
- * @brief Contexto de execução por CPU Core.
- */
 struct worker_t {
     pthread_t thread;
     int rb_fd;
     struct ring_buffer *rb;
     struct flow_state *flow_table;
+    FILE *out_f;
     char *s_buf;
     size_t s_off;
     int id;
+    uint64_t processed_events;
 };
 
 static struct worker_t *workers;
 static int num_workers = 1;
 static volatile bool exiting = false;
-static pthread_mutex_t out_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
-/**
- * @brief Callback de processamento de evento (per-packet).
- * Realiza a agregação em tempo real e serialização CSV.
- */
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz; struct worker_t *w = ctx;
     const struct packet_event_t *e = data;
 
-    /* Hashing local para busca na tabela de fluxos do Worker */
     uint32_t h = 0; const uint8_t *p = (const uint8_t *)&e->key;
     for (size_t i = 0; i < sizeof(struct flow_key); i++) h = h * 31 + p[i];
     uint32_t idx = h % FLOW_HASH_SIZE;
     while (w->flow_table[idx].active && memcmp(&w->flow_table[idx].key, &e->key, sizeof(struct flow_key)) != 0) idx = (idx + 1) % FLOW_HASH_SIZE;
     
-    /* Inicialização de novo fluxo no registro do Worker */
     if (!w->flow_table[idx].active) {
         memset(&w->flow_table[idx], 0, sizeof(struct flow_state)); memcpy(&w->flow_table[idx].key, &e->key, sizeof(struct flow_key));
         memcpy(&w->flow_table[idx].meta, &e->meta, sizeof(struct flow_meta));
@@ -163,16 +133,12 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 
     struct flow_state *s = &w->flow_table[idx];
     double duration = (double)(e->timestamp_ns - s->meta.start_time) / 1e9;
-    
-    /* Cálculo de IAT (Inter-Arrival Time) e Variância de Payload */
     if (s->t_last > 0) {
         w_update(&s->t_iat, (double)(e->timestamp_ns - s->t_last) / 1e9);
         w_update(&s->t_d_pay, abs((int)e->payload_len - (int)s->t_l_pay));
     }
     s->t_last = e->timestamp_ns; s->t_l_pay = e->payload_len;
     w_update(&s->t_pay, e->payload_len); w_update(&s->t_hdr, e->header_len);
-    
-    /* Direcionamento Bi-direcional */
     if (e->is_fwd) {
         if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
         s->f_last = e->timestamp_ns; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
@@ -187,7 +153,6 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e->key.dst_ip[12], dip, 64); }
     else { inet_ntop(AF_INET6, e->key.src_ip, sip, 64); inet_ntop(AF_INET6, e->key.dst_ip, dip, 64); }
 
-    /* Serialização O(1) para buffer privado */
     w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", sip, dip, ntohs(e->key.src_port), ntohs(e->key.dst_port), e->key.protocol, sip, ntohs(e->key.src_port), dip, ntohs(e->key.dst_port), e->key.protocol, (double)s->meta.start_time / 1e9, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
     
     #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), w_mode(&W))
@@ -196,41 +161,43 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
     w->s_off += snprintf(w->s_buf + w->s_off, 4096, "%.4f,%u,%u,%u\n", (double)e->payload_len/64.0, e->icmp_type, e->icmp_code, e->ttl);
     
-    /* Escrita atômica em disco para minimizar contenção no stdout */
-    if (w->s_off > 1000000 - 4096) {
-        pthread_mutex_lock(&out_mutex); fwrite(w->s_buf, 1, w->s_off, stdout); pthread_mutex_unlock(&out_mutex);
+    if (w->s_off > IO_BUFFER_SIZE - 4096) {
+        fwrite(w->s_buf, 1, w->s_off, w->out_f);
         w->s_off = 0;
     }
     if (e->tcp_flags & 0x05) s->active = 0;
+    w->processed_events++;
     return 0;
 }
 
-/**
- * @brief Thread de execução do Worker.
- * Implementa CPU Pinning e inicializa o RingBuffer do Core.
- */
 void *worker_fn(void *arg) {
     struct worker_t *w = arg;
     cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 256, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     
-    w->s_buf = malloc(1024 * 1024);
+    char fname[256]; sprintf(fname, "data/worker_events_cpu_%d.csv", w->id);
+    w->out_f = fopen(fname, "w");
+    if (!w->out_f) { fprintf(stderr, "Core %d: Failed to open %s\n", w->id, fname); return NULL; }
+    
+    setvbuf(w->out_f, NULL, _IOFBF, IO_BUFFER_SIZE);
+    w->s_buf = malloc(IO_BUFFER_SIZE);
     w->s_off = 0;
     w->flow_table = calloc(FLOW_HASH_SIZE, sizeof(struct flow_state));
     w->rb = ring_buffer__new(w->rb_fd, handle_event, w, NULL);
 
     while (!exiting) ring_buffer__poll(w->rb, 100);
 
-    if (w->s_off > 0) { pthread_mutex_lock(&out_mutex); fwrite(w->s_buf, 1, w->s_off, stdout); pthread_mutex_unlock(&out_mutex); }
-    free(w->s_buf); free(w->flow_table); ring_buffer__free(w->rb);
+    if (w->s_off > 0) fwrite(w->s_buf, 1, w->s_off, w->out_f);
+    fclose(w->out_f); free(w->s_buf); free(w->flow_table); ring_buffer__free(w->rb);
+    fprintf(stderr, "   [Worker %d] Finalizado: %lu eventos processados.\n", w->id, w->processed_events);
     return NULL;
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
+    mkdir("data", 0777);
 
-    /* Detecção dinâmica de hardware para portabilidade absoluta */
     int cores = sysconf(_SC_NPROCESSORS_ONLN);
     num_workers = cores;
     workers = calloc(num_workers, sizeof(struct worker_t));
@@ -240,28 +207,25 @@ int main(int argc, char **argv) {
 
     int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
 
-    /* Instanciação dinâmica de infraestrutura per-CPU */
     for (int i = 0; i < num_workers; i++) {
         workers[i].id = i;
         workers[i].rb_fd = bpf_create_map(BPF_MAP_TYPE_RINGBUF, 0, 0, 32 * 1024 * 1024, 0);
-        if (workers[i].rb_fd < 0) { fprintf(stderr, "Failed to create RB for CPU %d: %s\n", i, strerror(errno)); return 1; }
+        if (workers[i].rb_fd < 0) { fprintf(stderr, "Failed to create RB for CPU %d\n", i); return 1; }
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
 
-    /* Cabeçalho CSV para relatório acadêmico */
-    printf("flow_id,src_ip,src_port,dst_ip,dst_port,protocol,timestamp,duration,PacketsCount,FwdPacketsCount,BwdPacketsCount,TotalBytes,FwdBytes,BwdBytes,FwdBwdPktRatio,FwdBwdByteRatio,");
-    const char *dirs[] = {"Tot", "Fwd", "Bwd"}; const char *metrics[] = {"Pay", "Hdr", "IAT", "DeltaLen"};
-    for(int m=0; m<4; m++) for(int d=0; d<3; d++) printf("%s_%s_Max,%s_%s_Min,%s_%s_Mean,%s_%s_Std,%s_%s_Var,%s_%s_Median,%s_%s_Skew,%s_%s_Kurt,%s_%s_CoV,%s_%s_Mode,", dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m]);
-    const char *flgs[] = {"FIN", "SYN", "RST", "PSH", "ACK", "URG", "ECE", "CWR"};
-    for(int i=0; i<8; i++) printf("%s_Cnt,%s_Fwd_Cnt,%s_Bwd_Cnt,", flgs[i], flgs[i], flgs[i]);
-    printf("PayloadEntropy,IcmpType,IcmpCode,TTL\n");
+    fprintf(stderr, "🚀 [Control Plane] Iniciando %d Workers (Shared-Nothing I/O)...\n", num_workers);
 
-    /* Inicialização do pool de Workers descentralizados */
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
 
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
 
     for (int i = 0; i < num_workers; i++) pthread_join(workers[i].thread, NULL);
+    
+    uint64_t total = 0;
+    for (int i = 0; i < num_workers; i++) total += workers[i].processed_events;
+    fprintf(stderr, "🏆 [Total Research Integrity] %lu pacotes processados no Xeon.\n", total);
+
     bpf_object__close(obj); return 0;
 }
