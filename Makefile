@@ -33,7 +33,8 @@ BPF_CFLAGS = -g -O2 -target bpf -D__TARGET_ARCH_x86 -I$(EBPF_DIR) \
              -Wall -Wno-missing-declarations -Wno-compare-distinct-pointer-types
 
 # --- Linker Dependencies ---
-LDFLAGS = -lbpf -lelf -lz -lm
+# Explicitly including /usr/local/lib64 in rpath for custom libbpf 1.2+ builds.
+LDFLAGS = -L/usr/local/lib64 -lbpf -lelf -lz -lm -Wl,-rpath,/usr/local/lib64
 
 # --- Build Rules ---
 
