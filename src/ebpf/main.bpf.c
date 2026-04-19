@@ -1,6 +1,12 @@
 /**
  * @file main.bpf.c
  * @brief Data Plane Core - eBPF/XDP High-Performance Feature Extractor.
+ * 
+ * This module implements the kernel-space packet parsing and flow aggregation 
+ * logic. It supports Dual-Stack (IPv4/IPv6), VLAN tagging, and advanced 
+ * L4/L7 feature extraction.
+ * 
+ * @version 1.4.6
  */
 
 #include "vmlinux.h"
@@ -8,6 +14,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
+/* Standard Protocol Definitions */
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define IPPROTO_ICMP 1
@@ -19,9 +26,29 @@
 #define IPPROTO_AH 51
 #define IPPROTO_ESP 50
 #define IPPROTO_NONE 59
+
+/* Application Constants */
 #define VXLAN_PORT 4789
 #define MAX_ENTRIES 524288 
 
+/**
+ * @enum error_code_t
+ * @brief Diagnostic error codes for research-grade debugging.
+ */
+enum error_code_t {
+    ERR_L2_BOUNDS = 1,     /**< Ethernet/VLAN parsing out of bounds. */
+    ERR_L3_BOUNDS = 2,     /**< IP header parsing out of bounds. */
+    ERR_L3_UNKNOWN = 3,    /**< Unsupported EtherType (non-IP). */
+    ERR_L4_BOUNDS = 4,     /**< L4 header parsing out of bounds. */
+    ERR_EXT_BOUNDS = 5,    /**< IPv6 Extension header out of bounds. */
+    ERR_RINGBUF_FULL = 6,  /**< RingBuffer congestion/overflow. */
+    ERR_MAP_FULL = 7       /**< Flow state cache capacity exceeded. */
+};
+
+/**
+ * @struct flow_event_t
+ * @brief Telemetry event structure for asynchronous export.
+ */
 struct flow_event_t {
     __u8 src_ip[16]; __u8 dst_ip[16];
     __u16 src_port; __u16 dst_port;
@@ -33,12 +60,20 @@ struct flow_event_t {
     __u8 dns_payload_raw[256];
 } __attribute__((packed));
 
+/**
+ * @struct flow_key_t
+ * @brief 5-tuple lookup key.
+ */
 struct flow_key_t {
     __u8 src_ip[16]; __u8 dst_ip[16];
     __u16 src_port; __u16 dst_port;
     __u8 protocol;
 } __attribute__((packed));
 
+/**
+ * @struct flow_stats_t
+ * @brief Stateful flow counters.
+ */
 struct flow_stats_t {
     __u64 total_bytes __attribute__((aligned(8)));
     __u64 packet_count __attribute__((aligned(8)));
@@ -46,6 +81,9 @@ struct flow_stats_t {
     __u64 last_time_ns __attribute__((aligned(8)));
 } __attribute__((packed));
 
+/* --- BPF Maps --- */
+
+/** @brief Counter for RingBuffer drops. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -53,6 +91,15 @@ struct {
     __type(value, __u64);
 } drop_counter SEC(".maps");
 
+/** @brief Diagnostic map for error tracking. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 64);
+    __type(key, __u32);
+    __type(value, __u64);
+} error_stats SEC(".maps");
+
+/** @brief Global protocol distribution map. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
@@ -60,6 +107,7 @@ struct {
     __type(value, __u64);
 } proto_stats SEC(".maps");
 
+/** @brief Total packet counter. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -67,11 +115,13 @@ struct {
     __type(value, __u64);
 } raw_pkt_count SEC(".maps");
 
+/** @brief High-speed telemetry Ring Buffer. */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024 * 1024); 
 } flows_ringbuf SEC(".maps");
 
+/** @brief Stateful flow cache. */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_ENTRIES);
@@ -79,11 +129,24 @@ struct {
     __type(value, struct flow_stats_t);
 } flow_state_cache SEC(".maps");
 
+/* --- Internal Helpers --- */
+
+/** @brief Increments diagnostic error counters. */
+static __always_inline void count_error(__u32 code) {
+    __u64 *val = bpf_map_lookup_elem(&error_stats, &code);
+    if (val) __sync_fetch_and_add(val, 1);
+    else { __u64 one = 1; bpf_map_update_elem(&error_stats, &code, &one, BPF_ANY); }
+}
+
+/**
+ * @brief Parses L3 headers and maps IPs into 128-bit space.
+ * @return 0 on success, or an error code from error_code_t.
+ */
 static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto, 
                                    __u8 *src_ip, __u8 *dst_ip, __u8 *l4_proto, __u8 *ip_ver, void **l4_hdr) {
     if (eth_proto == bpf_htons(ETH_P_IP)) {
         struct iphdr *ip = data;
-        if ((void *)(ip + 1) > data_end) return -1;
+        if ((void *)(ip + 1) > data_end) return ERR_L3_BOUNDS;
         *ip_ver = 4; *l4_proto = ip->protocol;
         src_ip[10] = 0xff; src_ip[11] = 0xff;
         *(__u32 *)&src_ip[12] = ip->saddr;
@@ -93,34 +156,28 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         return 0;
     } else if (eth_proto == bpf_htons(ETH_P_IPV6)) {
         struct ipv6hdr *ip6 = data;
-        if ((void *)(ip6 + 1) > data_end) return -1;
+        if ((void *)(ip6 + 1) > data_end) return ERR_L3_BOUNDS;
         *ip_ver = 6; *l4_proto = ip6->nexthdr;
         __builtin_memcpy(src_ip, &ip6->saddr, 16);
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
         
-        /* Deep Extension Traversal (Verifier-Safe) */
         #pragma unroll
         for (int i = 0; i < 4; i++) {
             if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44 || *l4_proto == 51) {
                 struct { __u8 next; __u8 len; } *ext = next;
-                if ((void *)(ext + 1) > data_end) break;
+                if ((void *)(ext + 1) > data_end) return ERR_EXT_BOUNDS;
                 __u8 cur_proto = *l4_proto;
                 *l4_proto = ext->next;
-                
-                if (cur_proto == 44) {
-                    next += 8; /* Fragment Header is always 8 bytes */
-                } else if (cur_proto == 51) {
-                    next += (ext->len + 2) << 2; /* AH length is complex, but this is standard */
-                } else {
-                    next += (ext->len + 1) << 3; /* HbH, Dest, Routing */
-                }
+                if (cur_proto == 44) next += 8;
+                else if (cur_proto == 51) next += (ext->len + 2) << 2;
+                else next += (ext->len + 1) << 3;
             } else break;
         }
         *l4_hdr = next;
         return 0;
     }
-    return -1;
+    return ERR_L3_UNKNOWN;
 }
 
 static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_out) {
@@ -156,12 +213,15 @@ static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_o
     }
 }
 
+/**
+ * @brief XDP Ingestion Hook.
+ */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) return XDP_PASS;
+    if ((void *)(eth + 1) > data_end) { count_error(ERR_L2_BOUNDS); return XDP_PASS; }
 
     __u32 r_key = 0;
     __u64 *r_count = bpf_map_lookup_elem(&raw_pkt_count, &r_key);
@@ -170,15 +230,17 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
+    /* LLC/SNAP Extraction */
     if (eth_proto < 1536) {
-        if (l3_hdr + 8 > data_end) return XDP_PASS;
+        if (l3_hdr + 8 > data_end) { count_error(ERR_L2_BOUNDS); return XDP_PASS; }
         __u8 *llc = l3_hdr;
         if (llc[0] == 0xAA && llc[1] == 0xAA) {
             eth_proto = bpf_ntohs(*(__u16 *)(llc + 6));
             l3_hdr += 8;
-        } else return XDP_PASS;
+        } else { count_error(ERR_L3_UNKNOWN); return XDP_PASS; }
     }
 
+    /* QinQ Support */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
@@ -197,14 +259,14 @@ int xdp_prog(struct xdp_md *ctx) {
     __u8 src_ip[16] = {0}, dst_ip[16] = {0}, sni[64] = {0};
     __u16 win = 0; void *l4_hdr = NULL;
 
-    if (parse_l3(l3_hdr, data_end, bpf_htons(eth_proto), src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0)
-        return XDP_PASS;
+    int res = parse_l3(l3_hdr, data_end, bpf_htons(eth_proto), src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr);
+    if (res != 0) { count_error(res); return XDP_PASS; }
 
     __u16 pay_len = 0, head_len = 0, flags = 0, sport = 0, dport = 0;
     void *payload = NULL;
 
     if (l4_proto == IPPROTO_TCP) {
-        struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) > data_end) return XDP_PASS;
+        struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) > data_end) { count_error(ERR_L4_BOUNDS); return XDP_PASS; }
         sport = tcp->source; dport = tcp->dest; head_len = tcp->doff * 4;
         flags = (tcp->fin) | (tcp->syn << 1) | (tcp->rst << 2) | (tcp->psh << 3) | (tcp->ack << 4) | (tcp->urg << 5);
         payload = (void *)tcp + head_len;
@@ -214,14 +276,14 @@ int xdp_prog(struct xdp_md *ctx) {
         win = bpf_ntohs(tcp->window);
         if (bpf_ntohs(dport) == 443 || bpf_ntohs(sport) == 443) parse_sni(payload, data_end, sni);
     } else if (l4_proto == IPPROTO_UDP) {
-        struct udphdr *udp = l4_hdr; if ((void *)(udp + 1) > data_end) return XDP_PASS;
+        struct udphdr *udp = l4_hdr; if ((void *)(udp + 1) > data_end) { count_error(ERR_L4_BOUNDS); return XDP_PASS; }
         sport = udp->source; dport = udp->dest; head_len = 8;
         if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4) - head_len;
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - 8;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else if (l4_proto == IPPROTO_ICMP || l4_proto == IPPROTO_ICMPV6) {
         struct { __u8 t; __u8 c; __u16 chk; } *ic = l4_hdr;
-        if ((void *)(ic + 1) > data_end) return XDP_PASS;
+        if ((void *)(ic + 1) > data_end) { count_error(ERR_L4_BOUNDS); return XDP_PASS; }
         sport = ic->t; dport = ic->c; 
         if (ic->t == 8 || ic->t == 0 || ic->t == 128 || ic->t == 129) {
              struct { __u8 t; __u8 c; __u16 chk; __u16 id; __u16 seq; } *echo = l4_hdr;
@@ -232,7 +294,7 @@ int xdp_prog(struct xdp_md *ctx) {
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - head_len;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else {
-        /* Capture unknown L4 protocols as generic flows */
+        /* Protocol-Agnostic capture */
         sport = 0; dport = 0; head_len = 0;
         if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4);
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len);
@@ -255,11 +317,7 @@ int xdp_prog(struct xdp_md *ctx) {
     }
 
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
-    if (!ev) {
-        __u32 k0 = 0; __u64 *c = bpf_map_lookup_elem(&drop_counter, &k0);
-        if (c) __sync_fetch_and_add(c, 1);
-        return XDP_PASS;
-    }
+    if (!ev) { count_error(ERR_RINGBUF_FULL); return XDP_PASS; }
     __builtin_memcpy(ev->src_ip, src_ip, 16); __builtin_memcpy(ev->dst_ip, dst_ip, 16);
     ev->src_port = sport; ev->dst_port = dport; ev->protocol = l4_proto; ev->ip_ver = ip_ver;
     ev->payload_length = pay_len; ev->header_length = head_len;

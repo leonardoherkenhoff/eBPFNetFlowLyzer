@@ -104,7 +104,7 @@ def process_pcap_dir(pcap_dir, category_tag):
                         f_log.write(line)
                         f_log.flush()
                         # Only print important lines (Stats, Errors, System messages) to console
-                        if any(x in line for x in ["📊", "⚠️", "❌", "System", "Error", "Fatal", "└─"]):
+                        if any(x in line for x in ["📊", "⚠️", "❌", "System", "Error", "Fatal", "└─", "[Diagnostic]", "[Parser Errors]", "-"]):
                             print(f"   [Loader] {line.strip()}")
             
             import threading
