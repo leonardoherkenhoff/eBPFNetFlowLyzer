@@ -1,15 +1,16 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - High-Fidelity Network Feature Extractor
+ * @brief Data Plane Core - eBPF/XDP High-Performance Feature Extractor.
  * 
- * Research Objective: To implement a kernel-space packet interception engine 
- * capable of extracting L2-L7 features with O(1) complexity relative to 
- * traffic volume, utilizing eBPF/XDP for Milestone 3 (SBSeg 2026).
+ * This module implements the kernel-space packet parsing and flow aggregation 
+ * logic using eBPF/XDP. It provides O(1) flow tracking via LRU Hash Maps 
+ * and asynchronous event offloading via Ring Buffers.
  * 
- * Mathematical Framework:
- * - Flow Identification: $F = \{IP_s, IP_d, P_s, P_d, \mu\}$ where $\mu$ is the protocol.
- * - ICMP Granularity: For Echo Request/Reply, $P_s = \text{Identifier}$ to prevent 
- *   collision of distinct ping sessions.
+ * Architecture:
+ * - L2: Ethernet/VLAN/LLC-SNAP parsing.
+ * - L3: Unified Dual-Stack (IPv4/IPv6) handling.
+ * - L4: TCP/UDP/ICMP protocol-specific feature extraction.
+ * - L7: Heuristic DNS and TLS SNI parsing.
  */
 
 #include "vmlinux.h"
@@ -17,66 +18,82 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
-/* Constants for Protocol Identification */
+/** @brief Standard EtherType for IPv4. */
 #define ETH_P_IP 0x0800
+/** @brief Standard EtherType for IPv6. */
 #define ETH_P_IPV6 0x86DD
+
+/** @brief IANA Protocol number for ICMP. */
 #define IPPROTO_ICMP 1
+/** @brief IANA Protocol number for TCP. */
 #define IPPROTO_TCP 6
+/** @brief IANA Protocol number for UDP. */
 #define IPPROTO_UDP 17
+/** @brief IANA Protocol number for ICMPv6. */
 #define IPPROTO_ICMPV6 58
+/** @brief IANA Protocol number for GRE. */
 #define IPPROTO_GRE 47
+
+/** @brief Standard VXLAN UDP port for tunneling detection. */
 #define VXLAN_PORT 4789
 
-/** @brief Connection Table size. Optimized for high-throughput DDoS benchmarks. */
+/** 
+ * @def MAX_ENTRIES
+ * @brief Connection table limit optimized for high-volume research benchmarks.
+ */
 #define MAX_ENTRIES 524288 
 
 /**
  * @struct flow_event_t
- * @brief Binary layout for asynchronous telemetry transfer via RingBuffer.
- * Enforces strict alignment for cross-process memory fidelity.
+ * @brief Telemetry event structure for asynchronous transmission to User-Space.
+ * 
+ * Enforces a strictly packed binary layout to ensure cross-process memory fidelity.
+ * IPs are stored in a 128-bit array, with IPv4 mapped to ::ffff:0:0/96.
  */
 struct flow_event_t {
-    __u8 src_ip[16];        /**< 128-bit Source IP (IPv4-Mapped or Native IPv6) */
-    __u8 dst_ip[16];        /**< 128-bit Destination IP */
-    __u16 src_port;         /**< L4 Source Port or ICMP Identifier */
-    __u16 dst_port;         /**< L4 Destination Port or ICMP Code */
-    __u8 protocol;          /**< IANA Protocol Number */
-    __u8 ip_ver;            /**< IP Version (4 or 6) */
-    __u16 payload_length;   /**< L4 Payload size in bytes */
-    __u16 header_length;    /**< Combined L3+L4 header size */
-    __u8 tcp_flags;         /**< Tracked TCP flags (FIN, SYN, RST, PSH, ACK, URG) */
-    __u8 is_tunneled;       /**< Tunneling detection flag (GRE/VXLAN) */
-    __u8 sni_hostname[64];  /**< TLS Server Name Indication string */
-    __u8 ttl;               /**< Time-to-Live / Hop Limit (OS Fingerprinting) */
-    __u16 window_size;      /**< TCP Window Size (OS Fingerprinting) */
-    __u64 timestamp_ns;     /**< Monotonic arrival timestamp */
-    __u8 dns_payload_raw[256]; /**< Raw DNS payload for L7 analysis */
+    __u8 src_ip[16];          /**< 128-bit Source IP Address. */
+    __u8 dst_ip[16];          /**< 128-bit Destination IP Address. */
+    __u16 src_port;           /**< L4 Source Port or ICMP Identifier. */
+    __u16 dst_port;           /**< L4 Destination Port or ICMP Code. */
+    __u8 protocol;            /**< IANA Protocol Number. */
+    __u8 ip_ver;              /**< IP Version (4 or 6). */
+    __u16 payload_length;    /**< Length of the L4 payload. */
+    __u16 header_length;     /**< Combined length of L3 and L4 headers. */
+    __u8 tcp_flags;          /**< Tracked TCP flags bitmask. */
+    __u8 is_tunneled;        /**< Flag indicating tunneled traffic (GRE/VXLAN). */
+    __u8 sni_hostname[64];   /**< TLS Server Name Indication hostname. */
+    __u8 ttl;                /**< IP TTL or IPv6 Hop Limit. */
+    __u16 window_size;       /**< TCP Receive Window size. */
+    __u64 timestamp_ns;      /**< Monotonic packet arrival timestamp. */
+    __u8 dns_payload_raw[256]; /**< Raw L7 DNS payload buffer. */
 } __attribute__((packed));
 
 /**
  * @struct flow_key_t
- * @brief 5-tuple key for flow aggregation in LRU Maps.
+ * @brief 5-tuple lookup key for the BPF stateful flow cache.
  */
 struct flow_key_t {
-    __u8 src_ip[16];
-    __u8 dst_ip[16];
-    __u16 src_port;
-    __u16 dst_port;
-    __u8 protocol;
+    __u8 src_ip[16];         /**< Source IP. */
+    __u8 dst_ip[16];         /**< Destination IP. */
+    __u16 src_port;          /**< Source Port / ID. */
+    __u16 dst_port;          /**< Destination Port / Code. */
+    __u8 protocol;           /**< Protocol. */
 } __attribute__((packed));
 
 /**
  * @struct flow_stats_t
- * @brief Atomic counters for flow-level statistical aggregation.
+ * @brief Statistical counters for in-kernel flow accounting.
  */
 struct flow_stats_t {
-    __u64 total_bytes __attribute__((aligned(8)));
-    __u64 packet_count __attribute__((aligned(8)));
-    __u64 start_time_ns __attribute__((aligned(8)));
-    __u64 last_time_ns __attribute__((aligned(8)));
+    __u64 total_bytes __attribute__((aligned(8)));    /**< Total accumulated payload bytes. */
+    __u64 packet_count __attribute__((aligned(8)));   /**< Total packet count. */
+    __u64 start_time_ns __attribute__((aligned(8)));  /**< Monotonic start timestamp. */
+    __u64 last_time_ns __attribute__((aligned(8)));   /**< Monotonic last seen timestamp. */
 } __attribute__((packed));
 
-/* Diagnostic Maps for Research Observability */
+/* --- BPF Maps Definitions --- */
+
+/** @brief Counter for dropped events due to RingBuffer pressure. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -84,6 +101,7 @@ struct {
     __type(value, __u64);
 } drop_counter SEC(".maps");
 
+/** @brief Statistics per EtherType for protocol visibility. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
@@ -91,6 +109,7 @@ struct {
     __type(value, __u64);
 } proto_stats SEC(".maps");
 
+/** @brief Global packet counter for the XDP hook. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -98,13 +117,13 @@ struct {
     __type(value, __u64);
 } raw_pkt_count SEC(".maps");
 
-/** @brief High-speed buffer for offloading events to User-Space. (256MB) */
+/** @brief High-speed Ring Buffer for asynchronous telemetry export. */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024 * 1024); 
 } flows_ringbuf SEC(".maps");
 
-/** @brief Kernel-side flow state cache. Uses LRU to manage high-volume peaks. */
+/** @brief Stateful flow cache utilizing an LRU eviction policy. */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_ENTRIES);
@@ -112,9 +131,23 @@ struct {
     __type(value, struct flow_stats_t);
 } flow_state_cache SEC(".maps");
 
+/* --- Helper Functions --- */
+
 /**
- * @brief Unified L3 Parser for Dual-Stack traffic.
- * Maps IPv4 into IPv6 space (::ffff:0:0/96) to enable consistent 5-tuple hashing.
+ * @brief Parses the Layer 3 (IP) header and extracts core metadata.
+ * 
+ * Implements a unified IPv4-to-IPv6 mapping strategy to enable a single 
+ * hash table for Dual-Stack traffic.
+ * 
+ * @param data Pointer to the packet start.
+ * @param data_end Pointer to the end of packet buffer.
+ * @param eth_proto Ethernet Protocol (Big Endian).
+ * @param src_ip Output buffer for Source IP.
+ * @param dst_ip Output buffer for Destination IP.
+ * @param l4_proto Output pointer for Protocol.
+ * @param ip_ver Output pointer for IP Version.
+ * @param l4_hdr Output pointer to the L4 header start.
+ * @return 0 on success, -1 on parsing error or bounds violation.
  */
 static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto, 
                                    __u8 *src_ip, __u8 *dst_ip, __u8 *l4_proto, __u8 *ip_ver, void **l4_hdr) {
@@ -136,7 +169,7 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
         
-        /* Verifier-Safe IPv6 Extension Handling (Hop-by-Hop/Routing Skip) */
+        /* Verifier-safe IPv6 Extension skip (Single-pass heuristic) */
         if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44) {
             struct { __u8 next; __u8 len; } *ext = next;
             if ((void *)(ext + 1) <= data_end) {
@@ -151,13 +184,19 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
 }
 
 /**
- * @brief TLS SNI Parser.
- * Heuristic extraction of hostname from ClientHello messages (Port 443).
+ * @brief Heuristic parser for TLS SNI (Server Name Indication).
+ * 
+ * Traverses the TLS Handshake and Extensions to extract the hostname 
+ * from ClientHello messages. Bounded to 4 extensions to satisfy the verifier.
+ * 
+ * @param payload Pointer to the L4 payload.
+ * @param data_end Pointer to the end of packet buffer.
+ * @param sni_out Output buffer for the hostname (max 64 bytes).
  */
 static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_out) {
     if (payload + 6 > data_end) return;
     __u8 *p = payload;
-    if (p[0] != 0x16 || p[5] != 0x01) return; /* Handshake + ClientHello check */
+    if (p[0] != 0x16 || p[5] != 0x01) return;
     p += 44; 
     if (p + 1 > data_end) return;
     __u8 sid_len = p[0]; if (sid_len > 32) sid_len = 32;
@@ -176,7 +215,7 @@ static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_o
         __u16 type = bpf_ntohs(*(__u16 *)p);
         __u16 len = bpf_ntohs(*(__u16 *)(p + 2));
         p += 4;
-        if (type == 0) { /* Server Name Extension */
+        if (type == 0) {
             if (p + 5 > data_end) break;
             if (p[2] == 0) {
                 __u16 hn_len = bpf_ntohs(*(__u16 *)(p + 3));
@@ -192,8 +231,13 @@ static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_o
 }
 
 /**
- * @brief Main XDP Entry Point.
- * Implements a stateful flow extraction logic with early packet filtering.
+ * @brief Main XDP Program Entry Point.
+ * 
+ * Performs high-speed packet interception, L2-L4 parsing, stateful flow 
+ * aggregation, and asynchronous telemetry reporting.
+ * 
+ * @param ctx Pointer to the XDP metadata context.
+ * @return XDP_PASS to allow the packet to reach the networking stack.
  */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
@@ -202,7 +246,7 @@ int xdp_prog(struct xdp_md *ctx) {
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) return XDP_PASS;
 
-    /* Global accounting */
+    /* Global Ingestion Counter */
     __u32 r_key = 0;
     __u64 *r_count = bpf_map_lookup_elem(&raw_pkt_count, &r_key);
     if (r_count) __sync_fetch_and_add(r_count, 1);
@@ -210,26 +254,32 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    /* Handle VLAN Tags (Single/Double Stack) */
+    /* Layer 2: Handle VLAN Encapsulation (802.1Q / 802.1ad) */
     if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
-        struct vlan_hdr_t { __u16 tci; __u16 proto; } *v = l3_hdr;
+        struct { __u16 tci; __u16 proto; } *v = l3_hdr;
         if ((void *)(v + 1) > data_end) return XDP_PASS;
         eth_proto = bpf_ntohs(v->proto);
         l3_hdr = (void *)(v + 1);
     }
 
-    /* L3/L4 Parsing Logic */
+    /* Update Protocol Distribution Map */
+    __u64 *p_count = bpf_map_lookup_elem(&proto_stats, &eth_proto);
+    if (p_count) __sync_fetch_and_add(p_count, 1);
+    else { __u64 one = 1; bpf_map_update_elem(&proto_stats, &eth_proto, &one, BPF_ANY); }
+
+    /* Core Parsing Variables */
     __u8 ip_ver = 0, l4_proto = 0, is_tun = 0, ttl = 0;
     __u8 src_ip[16] = {0}, dst_ip[16] = {0}, sni[64] = {0};
     __u16 win = 0; void *l4_hdr = NULL;
 
+    /* Layer 3 Parsing */
     if (parse_l3(l3_hdr, data_end, bpf_htons(eth_proto), src_ip, dst_ip, &l4_proto, &ip_ver, &l4_hdr) != 0)
         return XDP_PASS;
 
+    /* Layer 4 Parsing and Feature Extraction */
     __u16 pay_len = 0, head_len = 0, flags = 0, sport = 0, dport = 0;
     void *payload = NULL;
 
-    /* Protocol-Specific Extraction */
     if (l4_proto == IPPROTO_TCP) {
         struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) > data_end) return XDP_PASS;
         sport = tcp->source; dport = tcp->dest; head_len = tcp->doff * 4;
@@ -247,13 +297,13 @@ int xdp_prog(struct xdp_md *ctx) {
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - 8;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else if (l4_proto == IPPROTO_ICMP || l4_proto == IPPROTO_ICMPV6) {
-        struct icmphdr_t { __u8 t; __u8 c; __u16 chk; } *ic = l4_hdr;
+        struct { __u8 t; __u8 c; __u16 chk; } *ic = l4_hdr;
         if ((void *)(ic + 1) > data_end) return XDP_PASS;
-        
-        /* Granular Flow Differentiation for ICMP via Identifier */
         sport = ic->t; dport = ic->c; 
+        
+        /* Research Feature: Use ICMP Identifier as Source Port for session granularity */
         if (ic->t == 8 || ic->t == 0 || ic->t == 128 || ic->t == 129) {
-             struct icmp_echo_t { __u8 t; __u8 c; __u16 chk; __u16 id; __u16 seq; } *echo = l4_hdr;
+             struct { __u8 t; __u8 c; __u16 chk; __u16 id; __u16 seq; } *echo = l4_hdr;
              if ((void *)(echo + 1) <= data_end) sport = bpf_ntohs(echo->id); 
         }
         head_len = 8;
@@ -262,7 +312,7 @@ int xdp_prog(struct xdp_md *ctx) {
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else return XDP_PASS;
 
-    /* Flow Map Aggregation */
+    /* Stateful Flow Cache Update */
     struct flow_key_t k = {0};
     __builtin_memcpy(k.src_ip, src_ip, 16); __builtin_memcpy(k.dst_ip, dst_ip, 16);
     k.src_port = sport; k.dst_port = dport; k.protocol = l4_proto;
@@ -278,7 +328,7 @@ int xdp_prog(struct xdp_md *ctx) {
         bpf_map_update_elem(&flow_state_cache, &k, &ns, BPF_ANY);
     }
 
-    /* RingBuffer Offloading */
+    /* Asynchronous Telemetry Dispatch via RingBuffer */
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
     if (!ev) {
         __u32 k0 = 0; __u64 *c = bpf_map_lookup_elem(&drop_counter, &k0);
@@ -292,7 +342,7 @@ int xdp_prog(struct xdp_md *ctx) {
     ev->ttl = ttl; ev->window_size = win;
     __builtin_memcpy(ev->sni_hostname, sni, 64);
     
-    /* DNS Telemetry extraction (L7 buffer) */
+    /* Layer 7: DNS payload offloading (Limited to 256 bytes) */
     if (l4_proto == 17 && (bpf_ntohs(sport) == 53 || bpf_ntohs(dport) == 53)) {
         void *dns_p = (void *)l4_hdr + 8;
         if (dns_p + 256 <= data_end) bpf_probe_read_kernel(ev->dns_payload_raw, 256, dns_p);
