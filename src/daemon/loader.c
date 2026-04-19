@@ -134,9 +134,9 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 
     /* 2. Advanced Moments (Payload) */
     printf("%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,",
-           s->t_pay.mean, sqrt(s->t_pay.M2/(s->t_pay.n?s->t_pay.n:1)), w_skew(&s->t_pay), w_kurt(&s->t_pay), s->t_pay.max,
-           s->f_pay.mean, sqrt(s->f_pay.M2/(s->f_pay.n?s->f_pay.n:1)), w_skew(&s->f_pay), w_kurt(&s->f_pay), s->f_pay.max,
-           s->b_pay.mean, sqrt(s->b_pay.M2/(s->b_pay.n?s->b_pay.n:1)), w_skew(&s->b_pay), w_kurt(&s->b_pay), s->b_pay.max);
+           s->t_pay.M1, sqrt(s->t_pay.M2/(s->t_pay.n?s->t_pay.n:1)), w_skew(&s->t_pay), w_kurt(&s->t_pay), s->t_pay.max,
+           s->f_pay.M1, sqrt(s->f_pay.M2/(s->f_pay.n?s->f_pay.n:1)), w_skew(&s->f_pay), w_kurt(&s->f_pay), s->f_pay.max,
+           s->b_pay.M1, sqrt(s->b_pay.M2/(s->b_pay.n?s->b_pay.n:1)), w_skew(&s->b_pay), w_kurt(&s->b_pay), s->b_pay.max);
 
     /* 3. L7 Entropy & ICMP */
     printf("%.4f,%u,%u,0x%02x,%u\n", calculate_entropy(e->payload_hint, 64), e->icmp_type, e->icmp_code, e->tcp_flags, e->ttl);
