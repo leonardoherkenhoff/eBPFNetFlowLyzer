@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""
-eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.10)
------------------------------------------------------------
-v1.9.10 Path Collision Fix:
-- Redirects worker telemetry to 'worker_telemetry/' instead of 'data/'.
-- Prevents accidental deletion of the project's data tree.
-"""
+/**
+ * eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.11)
+ * -----------------------------------------------------------
+ * Research Methodology Fixes:
+ * 1. Post-Extraction Flush Resilience: Increased timeout to 300s for 48-core buffer flushing.
+ * 2. Path Normalization: Resolved the '.' suffix in interim directories.
+ * 3. Injection Counter: Improved tcpreplay output parsing to ensure reporting accuracy.
+ */
 
 import subprocess
 import os
@@ -14,13 +15,13 @@ import glob
 import json
 import threading
 import shutil
+import re
 
 # --- Project Paths ---
 BASE_DIR = "/opt/eBPFNetFlowLyzer"
 DATA_RAW = os.path.join(BASE_DIR, "data/raw")
 DATA_INTERIM = os.path.join(BASE_DIR, "data/interim/EBPF_RAW")
 LOADER_BIN = os.path.join(BASE_DIR, "build/loader")
-# v1.9.10: Use a dedicated folder outside of the project's main 'data/' tree
 WORKER_DATA_DIR = os.path.join(BASE_DIR, "worker_telemetry") 
 
 # --- Research Constraints ---
@@ -31,13 +32,13 @@ def process_pcap_dir(pcap_dir, category):
     Orchestrates the extraction of a single PCAP directory.
     """
     rel_path = os.path.relpath(pcap_dir, os.path.join(DATA_RAW, category))
-    output_dir = os.path.join(DATA_INTERIM, category, rel_path)
-    
-    # Ensure the final output path exists
+    # Normalize path to avoid trailing dots
+    output_dir = os.path.normpath(os.path.join(DATA_INTERIM, category, rel_path))
     os.makedirs(output_dir, exist_ok=True)
     
     pcaps = glob.glob(os.path.join(pcap_dir, "*.pcap*"))
     if not pcaps:
+        print(f"   ⚠️ No PCAPs found in {pcap_dir}")
         return
 
     metrics_csv = os.path.join(output_dir, "resource_metrics.csv")
@@ -45,13 +46,11 @@ def process_pcap_dir(pcap_dir, category):
 
     print(f"\n🚀 STARTING eBPF EXTRACTION: {experiment_name}")
     
-    # Pre-clean the temporary worker data directory
     if os.path.exists(WORKER_DATA_DIR):
         shutil.rmtree(WORKER_DATA_DIR)
     os.makedirs(WORKER_DATA_DIR, exist_ok=True)
     
     # --- Step 1: Network Topology Initialization ---
-    print("   🔧 Resetting VETH topology (veth0 <-> veth1)")
     subprocess.run(["sudo", "ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
     subprocess.run(["sudo", "ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1"], check=True)
     subprocess.run(["sudo", "ip", "link", "set", "veth0", "up"], check=True)
@@ -88,7 +87,7 @@ def process_pcap_dir(pcap_dir, category):
         log_thread = threading.Thread(target=stream_logs, args=(proc_loader, loader_log_path), daemon=True)
         log_thread.start()
         
-        time.sleep(3) 
+        time.sleep(5) # Grace period for 48-core init
         
         # --- Step 3: Resource Monitoring ---
         monitor_script = "scripts/testbed/monitor.py"
@@ -102,13 +101,14 @@ def process_pcap_dir(pcap_dir, category):
         
         for p in pcaps:
             print(f"   Streaming: {os.path.basename(p)}")
+            # -t allows for top-speed replay
             cmd = f"sudo tcpreplay -i veth0 -t {p} 2>&1"
             try:
                 res = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
-                for line in res.stdout.split('\n'):
-                    if "packets" in line and "sent" in line:
-                        try: total_packets += int(line.split()[0])
-                        except: pass
+                # Improved regex for tcpreplay output
+                matches = re.findall(r"(\d+)\s+packets", res.stdout)
+                if matches:
+                    total_packets += int(matches[0])
             except subprocess.CalledProcessError as e:
                 print(f"   ❌ Replay Error: {e.stderr}")
 
@@ -116,19 +116,20 @@ def process_pcap_dir(pcap_dir, category):
         pps = total_packets / elapsed if elapsed > 0 else 0
         
         # --- Step 5: Termination & Synchronization ---
-        print("   🛑 Terminating Loader and Monitoring...")
+        print("   🛑 Terminating Loader and Monitoring (Syncing Buffers)...")
         if proc_mon:
             proc_mon.terminate()
             proc_mon.wait()
         
         subprocess.run(["sudo", "kill", "-INT", str(proc_loader.pid)], check=False)
         try:
-            proc_loader.wait(timeout=30)
+            # INCREASED TIMEOUT to 300s for massive partitioned flushes
+            proc_loader.wait(timeout=300)
         except subprocess.TimeoutExpired:
-            print("   ⚠️ Loader timed out. Force killing...")
+            print("   ⚠️ Loader timed out during flush. Force killing...")
             subprocess.run(["sudo", "kill", "-9", str(proc_loader.pid)], check=False)
             
-        log_thread.join(timeout=5)
+        log_thread.join(timeout=10)
 
         # --- Step 6: Telemetry Collection ---
         print("   📂 Collecting partitioned telemetry...")
@@ -140,7 +141,6 @@ def process_pcap_dir(pcap_dir, category):
                 print(f"   ⚠️ Failed to move {os.path.basename(wf)}: {e}")
             
     finally:
-        print("   🧹 Cleaning up VETH topology")
         subprocess.run(["sudo", "ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
     
     summary = {
@@ -155,7 +155,7 @@ def process_pcap_dir(pcap_dir, category):
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.10) ===")
+    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.11) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return
