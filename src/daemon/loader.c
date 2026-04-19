@@ -1,13 +1,12 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.9).
+ * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.10).
  * 
  * @details 
- * Versão de Alta Fidelidade com Particionamento de I/O Total.
- * Elimina o Mutex global de escrita, resolvendo o 'freeze' em sistemas 48-core.
- * Cada core escreve em seu próprio arquivo CSV, garantindo Zero-Contention I/O.
+ * Corrigido diretório de saída para evitar colisão com a estrutura de dados do projeto.
+ * Utiliza 'worker_telemetry/' para armazenamento temporário das partições de core.
  * 
- * @version 1.9.9 (High-Fidelity / Partitioned I/O)
+ * @version 1.9.10 (Path Collision Fix)
  */
 
 #define _GNU_SOURCE
@@ -32,7 +31,7 @@
 
 #define FLOW_HASH_SIZE 131072
 #define HISTOGRAM_BINS 64
-#define IO_BUFFER_SIZE (2 * 1024 * 1024) /* 2MB Buffer for sustained throughput */
+#define IO_BUFFER_SIZE (2 * 1024 * 1024)
 
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
@@ -175,7 +174,7 @@ void *worker_fn(void *arg) {
     cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 256, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
     
-    char fname[256]; sprintf(fname, "data/worker_events_cpu_%d.csv", w->id);
+    char fname[256]; sprintf(fname, "worker_telemetry/cpu_%d.csv", w->id);
     w->out_f = fopen(fname, "w");
     if (!w->out_f) { fprintf(stderr, "Core %d: Failed to open %s\n", w->id, fname); return NULL; }
     
@@ -196,7 +195,7 @@ void *worker_fn(void *arg) {
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
-    mkdir("data", 0777);
+    mkdir("worker_telemetry", 0777);
 
     int cores = sysconf(_SC_NPROCESSORS_ONLN);
     num_workers = cores;
@@ -214,7 +213,7 @@ int main(int argc, char **argv) {
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
 
-    fprintf(stderr, "🚀 [Control Plane] Iniciando %d Workers (Shared-Nothing I/O)...\n", num_workers);
+    fprintf(stderr, "🚀 [Control Plane] Iniciando %d Workers (Partitioned I/O)...\n", num_workers);
 
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
 
@@ -225,7 +224,7 @@ int main(int argc, char **argv) {
     
     uint64_t total = 0;
     for (int i = 0; i < num_workers; i++) total += workers[i].processed_events;
-    fprintf(stderr, "🏆 [Total Research Integrity] %lu pacotes processados no Xeon.\n", total);
+    fprintf(stderr, "🏆 [Total Research Integrity] %lu pacotes processados.\n", total);
 
     bpf_object__close(obj); return 0;
 }

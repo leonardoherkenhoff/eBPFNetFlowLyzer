@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.9)
+eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.10)
 -----------------------------------------------------------
-Research Methodology:
-This script provides a high-level Python abstraction for executing the 
-eBPF feature extraction pipeline on captured network traffic (PCAPs).
-
-v1.9.9 Enhancements:
-- Partitioned I/O Support: Manages multi-threaded core-specific CSV outputs.
-- Deadlock Prevention: Eliminates global stdout redirection to avoid cleanup hangs.
-- Automatic File Aggregation: Relocates core-specific telemetry to experiment folders.
+v1.9.10 Path Collision Fix:
+- Redirects worker telemetry to 'worker_telemetry/' instead of 'data/'.
+- Prevents accidental deletion of the project's data tree.
 """
 
 import subprocess
@@ -25,7 +20,8 @@ BASE_DIR = "/opt/eBPFNetFlowLyzer"
 DATA_RAW = os.path.join(BASE_DIR, "data/raw")
 DATA_INTERIM = os.path.join(BASE_DIR, "data/interim/EBPF_RAW")
 LOADER_BIN = os.path.join(BASE_DIR, "build/loader")
-WORKER_DATA_DIR = os.path.join(BASE_DIR, "data") # Created by loader.c v1.9.9
+# v1.9.10: Use a dedicated folder outside of the project's main 'data/' tree
+WORKER_DATA_DIR = os.path.join(BASE_DIR, "worker_telemetry") 
 
 # --- Research Constraints ---
 EXPERIMENT_ORDER = ["PCAPv6", "PCAP"]
@@ -36,6 +32,8 @@ def process_pcap_dir(pcap_dir, category):
     """
     rel_path = os.path.relpath(pcap_dir, os.path.join(DATA_RAW, category))
     output_dir = os.path.join(DATA_INTERIM, category, rel_path)
+    
+    # Ensure the final output path exists
     os.makedirs(output_dir, exist_ok=True)
     
     pcaps = glob.glob(os.path.join(pcap_dir, "*.pcap*"))
@@ -47,7 +45,7 @@ def process_pcap_dir(pcap_dir, category):
 
     print(f"\n🚀 STARTING eBPF EXTRACTION: {experiment_name}")
     
-    # Pre-clean worker data directory to ensure isolation between experiments
+    # Pre-clean the temporary worker data directory
     if os.path.exists(WORKER_DATA_DIR):
         shutil.rmtree(WORKER_DATA_DIR)
     os.makedirs(WORKER_DATA_DIR, exist_ok=True)
@@ -67,7 +65,6 @@ def process_pcap_dir(pcap_dir, category):
         # --- Step 2: Daemon Ignition ---
         loader_log_path = os.path.join(output_dir, "loader_stderr.log")
         
-        # Loader v1.9.9 writes to its own files, so we only capture stderr
         proc_loader = subprocess.Popen(
             ["sudo", LOADER_BIN, "veth1"], 
             stdout=subprocess.DEVNULL, 
@@ -77,18 +74,21 @@ def process_pcap_dir(pcap_dir, category):
         )
         
         def stream_logs(proc, log_file_path):
-            with open(log_file_path, 'w') as f_log:
-                for line in iter(proc.stderr.readline, ""):
-                    if not line: break
-                    f_log.write(line)
-                    f_log.flush()
-                    if any(x in line for x in ["📊", "⚠️", "❌", "System", "Error", "Fatal", "└─", "[Diagnostic]", "[Parser Errors]", "-", "🏆"]):
-                        print(f"   [Loader] {line.strip()}")
+            try:
+                with open(log_file_path, 'w') as f_log:
+                    for line in iter(proc.stderr.readline, ""):
+                        if not line: break
+                        f_log.write(line)
+                        f_log.flush()
+                        if any(x in line for x in ["📊", "⚠️", "❌", "System", "Error", "Fatal", "└─", "[Diagnostic]", "[Parser Errors]", "-", "🏆"]):
+                            print(f"   [Loader] {line.strip()}")
+            except Exception as e:
+                print(f"   [Wrapper] Log Thread Error: {e}")
         
         log_thread = threading.Thread(target=stream_logs, args=(proc_loader, loader_log_path), daemon=True)
         log_thread.start()
         
-        time.sleep(3) # Increased grace period for 48-core initialization
+        time.sleep(3) 
         
         # --- Step 3: Resource Monitoring ---
         monitor_script = "scripts/testbed/monitor.py"
@@ -121,21 +121,23 @@ def process_pcap_dir(pcap_dir, category):
             proc_mon.terminate()
             proc_mon.wait()
         
-        # Signal loader to flush buffers and exit
         subprocess.run(["sudo", "kill", "-INT", str(proc_loader.pid)], check=False)
         try:
             proc_loader.wait(timeout=30)
         except subprocess.TimeoutExpired:
-            print("   ⚠️ Loader timed out during flush. Force killing...")
+            print("   ⚠️ Loader timed out. Force killing...")
             subprocess.run(["sudo", "kill", "-9", str(proc_loader.pid)], check=False)
             
         log_thread.join(timeout=5)
 
-        # --- Step 6: Telemetry Collection (Partitioned files) ---
+        # --- Step 6: Telemetry Collection ---
         print("   📂 Collecting partitioned telemetry...")
         worker_files = glob.glob(os.path.join(WORKER_DATA_DIR, "*.csv"))
         for wf in worker_files:
-            shutil.move(wf, output_dir)
+            try:
+                shutil.move(wf, output_dir)
+            except Exception as e:
+                print(f"   ⚠️ Failed to move {os.path.basename(wf)}: {e}")
             
     finally:
         print("   🧹 Cleaning up VETH topology")
@@ -153,7 +155,7 @@ def process_pcap_dir(pcap_dir, category):
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== eBPFNetFlowLyzer Research Pipeline (Partitioned I/O Mode) ===")
+    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.10) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return
