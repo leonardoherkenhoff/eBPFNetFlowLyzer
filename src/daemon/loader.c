@@ -284,8 +284,9 @@ void *worker_fn(void *arg) {
 
 /**
  * @brief Orchestrator Main.
- * @details Performs dynamic CPU detection, instantiates core-private 
- * RingBuffers, and attaches XDP programs to the specified interfaces.
+ * @details Performs dynamic CPU detection and hardware-aware map resizing 
+ * to ensure absolute scalability. Instantiates core-private RingBuffers 
+ * and attaches XDP programs to the specified interfaces.
  */
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);

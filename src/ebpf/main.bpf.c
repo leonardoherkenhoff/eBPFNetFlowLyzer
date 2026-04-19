@@ -84,7 +84,7 @@ struct {
  */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
-    __uint(max_entries, 1);
+    __uint(max_entries, 1); /**< Placeholder: Dynamically resized in loader.c based on CPU count */
     __type(key, uint32_t);
     __type(value, int);
 } pkt_ringbuf_map SEC(".maps");
