@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-ebpf_labeler.py - Lynceus Research Pipeline - Dataset Labeling Utility (v1.0)
+ebpf_labeler.py - Lynceus Research Pipeline - Dataset Labeling Utility (v2.0-Research)
 ---------------------------------------------------------------------------
-v1.0 Stable Research Milestone:
+v2.0-Research Stable Milestone:
 - Context: Post-extraction labeling for Lynceus telemetry.
 - Feature: Atomic category-based labeling and recursive discovery.
 - Multi-Worker Aggregation: Handles partitioned worker CSVs natively.
@@ -69,7 +69,7 @@ def process_file_auto(file_path):
         return False, 0, 0
 
 def main():
-    parser = argparse.ArgumentParser(description="eBPFNetFlowLyzer Labeler v1.9.12")
+    parser = argparse.ArgumentParser(description="eBPFNetFlowLyzer Labeler v2.0-Research")
     parser.add_argument("--path", type=str, help="Specific interim directory to label")
     parser.add_argument("--cleanup", action="store_true", help="Delete interim files after labeling")
     args = parser.parse_args()

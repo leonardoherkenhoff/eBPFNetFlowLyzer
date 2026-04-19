@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-ebpf_run_benchmark.py - Lynceus Research Pipeline - ML Benchmark Suite (v3.1.0).
+ebpf_run_benchmark.py - Lynceus Research Pipeline - ML Benchmark Suite (v2.0-Research).
 ------------------------------------------------------
-v3.1.0 Stable Research Milestone:
+v2.0-Research Stable Milestone:
 - Validation: High-fidelity F1-Score benchmarking for Lynceus features.
 - Context: Post-labeling analysis and feature importance estimation.
-- Dynamic Labeling Logic: Correctly identifies attack categories vs 'BENIGN'.
+- Feature Selection: Excludes identifiers and metadata to ensure generalizable results.
 - Memory Optimization: Chunked loading for multi-gigabyte research datasets.
 """
 
@@ -14,16 +14,17 @@ import numpy as np
 import os
 import glob
 import gc
+import argparse
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 
 def process_dataframe(df):
     """
-    Standardizes feature selection for the v1.9.x partitioned dataset.
+    Standardizes feature selection for the v2.0.x partitioned dataset.
     """
-    # Identity & metadata columns to exclude from training
-    drop_cols = ['flow_id', 'timestamp', 'src_ip', 'dst_ip', 'Label']
+    # Identity & metadata columns to exclude from training (Avoid over-fitting on specific tool footprints)
+    drop_cols = ['flow_id', 'timestamp', 'src_ip', 'dst_ip', 'src_port', 'dst_port', 'Label']
     
     if 'Label' not in df.columns:
         return None, None
@@ -34,14 +35,14 @@ def process_dataframe(df):
     # Ensure numeric consistency
     X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
     
-    # v3.1.0 Logic: 'BENIGN' is 0, any other category (DNS, NTP, etc) is 1 (Attack)
+    # v2.0.0 Logic: 'BENIGN' is 0, any other category (DNS, NTP, etc) is 1 (Attack)
     y_binary = y.apply(lambda x: 0 if str(x).upper() == 'BENIGN' else 1)
     
     return X, y_binary
 
 def run_benchmark():
     processed_dir = "/opt/eBPFNetFlowLyzer/data/processed/EBPF"
-    # v3.1.0: Recursive search for labeled files across the experiment tree
+    # v2.0.0: Recursive search for labeled files across the experiment tree
     processed_files = glob.glob(os.path.join(processed_dir, "**", "*.csv"), recursive=True)
     
     if not processed_files:

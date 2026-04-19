@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Lynceus Research Pipeline - Extraction Wrapper & Testbed Orchestrator (v1.0)
+Lynceus Research Pipeline - Extraction Wrapper & Testbed Orchestrator (v2.0-Research)
 -----------------------------------------------------------
-v1.0 Stable Research Milestone:
+v2.0-Research Stable Milestone:
 - Engine: Lynceus v2.0 (Massively Parallel eBPF Extractor).
 - "Extract-Label-Purge" Strategy: Integrates labelling and cleanup into the loop.
 - NOTE: Current version uses VETH pairs for simulation. For production 
@@ -40,7 +40,7 @@ def process_pcap_dir(pcap_dir, category):
     pcaps = glob.glob(os.path.join(pcap_dir, "*.pcap*"))
     if not pcaps:
         return
-
+    
     metrics_csv = os.path.join(output_dir, "resource_metrics.csv")
     experiment_name = f"{category}/{rel_path}"
 
@@ -157,7 +157,7 @@ def process_pcap_dir(pcap_dir, category):
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== Lynceus Research Pipeline (v1.0 Iterative) ===")
+    print("=== Lynceus Research Pipeline (v2.0-Research Iterative) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return

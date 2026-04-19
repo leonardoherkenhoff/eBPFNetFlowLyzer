@@ -1,5 +1,5 @@
 """
-Hardware Resource Monitor for Lynceus
+Hardware Resource Monitor for Lynceus (v2.0-Research)
 ----------------------------------------------
 This script performs high-frequency sampling of CPU and Memory (RAM) utilization
 during the network feature extraction benchmarks.
