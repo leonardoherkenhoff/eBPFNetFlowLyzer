@@ -1,46 +1,45 @@
 # 🛡️ eBPFNetFlowLyzer v1.9.1
 
-**Unified, High-Performance, Stateful Network Feature Extractor Powered by C-eBPF/XDP.**
+**High-Performance, Stateful Network Feature Extractor Powered by C-eBPF/XDP.**
 
 ---
 
 ## 📌 Overview
 
-**eBPFNetFlowLyzer** is a next-generation network traffic feature extractor engineered for high-throughput security environments and academic research. By leveraging a **100% C-native architecture**, it offloads stateful flow aggregation to the **eBPF/XDP** layer, achieving massive throughput with negligible CPU impact.
+**eBPFNetFlowLyzer** is an industrial-grade network traffic feature extractor engineered for high-throughput security environments, traffic analysis, and anomaly detection. By leveraging a **100% C-native architecture**, it offloads stateful flow aggregation to the **eBPF/XDP** layer, achieving massive throughput with negligible CPU impact.
 
-The system implements a **Unified Master Feature Matrix**, achieving 100% taxonomic parity with leading research tools (**NTLFlowLyzer** and **ALFlowLyzer**). It utilizes a single, numerically stable O(1) statistical pipeline to process **IPv4**, **IPv6**, and **ICMP/ICMPv6** traffic, capturing atomic bidirectional telemetry at line-rate.
+The system implements a **State-of-the-Art Statistical Engine**, providing high-resolution bidirectional telemetry through a numerically stable O(1) pipeline. It is designed to capture atomic per-packet events across **IPv4**, **IPv6**, and **ICMP** protocols, ensuring zero-loss extraction even under volumetric network conditions.
 
 ## 🚀 Key Features (v1.9.1)
 
-*   **Unified Taxonomic Matrix**: Consolidation of 348 (NTL) and 130 (AL) features into a single, non-redundant high-dimensional space for DDoS research.
-*   **Stateful XDP Ingestion**: In-kernel flow correlation using lock-free hash tables for maximum throughput and resistance to volumetric flooding.
-*   **O(1) Statistical Moments**: Real-time calculation of Mean ($\mu$), Variance ($\sigma^2$), Skewness ($\gamma$), and Kurtosis ($\kappa$) using Pébay's incremental update formulas.
-*   **Advanced Metric Estimation**: Real-time $O(1)$ estimators for **Median** (Iterative SGD) and **Mode** (Histogram-based), enabling absolute parity with offline extractors.
-*   **I/O Accelerated Extraction**: Optimized 1MB full-buffer output engine capable of sustaining zero-loss capture for 33M+ packet datasets.
-*   **Research Orchestration**: Full-lifecycle benchmarking suite including traffic injection (tcpreplay), hardware monitoring, and ML-ready CSV labeling for SBSeg 2026 standards.
+*   **Massive Feature Vector (400+)**: Extraction of high-dimensional flow signatures, including 4th-order statistical moments and application-layer entropy.
+*   **Stateful XDP Ingestion**: In-kernel flow correlation using lock-free hash tables for maximum throughput and resistance to network flooding.
+*   **O(1) Statistical Moments**: Real-time calculation of Mean ($\mu$), Variance ($\sigma^2$), Skewness ($\gamma$), and Kurtosis ($\kappa$) using incremental update algorithms.
+*   **Real-Time Metric Estimators**: Hardware-efficient estimators for **Median** and **Mode**, providing a complete statistical profile of network flows without offline processing.
+*   **Volatility Analysis (Deltas)**: Real-time tracking of inter-packet variations (Size/Timing) to identify jitter and burstiness signatures.
+*   **Industrial I/O Optimization**: High-speed 1MB buffered output engine designed for large-scale data ingestion and Big Data pipelines.
 
 ## 🏛️ Architecture
 
-*   **Data Plane (Kernel Space)**: XDP-based interceptor responsible for early-stage packet parsing, 5-tuple normalization, and atomic flow event streaming via RingBuffer.
-*   **Control Plane (User Space)**: High-performance C Daemon that orchestrates the BPF RingBuffer, implements the 10-moment statistical engine, and persists data via accelerated I/O.
-*   **Analysis Suite (Python)**: Scientific pipeline for dataset preprocessing, topological ground truth labeling, and Machine Learning validation (Random Forest).
+*   **Data Plane (Kernel Space)**: XDP-based interceptor responsible for early-stage packet parsing, 5-tuple normalization, and high-speed flow event streaming.
+*   **Control Plane (User Space)**: Deeply optimized C Daemon that orchestrates the BPF RingBuffer, manages bidirectional state, and persists multi-dimensional telemetry to CSV.
 
-## 🛠️ Build & Execution
+## 🛠️ Build & Installation
 
 ### Prerequisites
-*   **Linux Kernel**: 5.15+ (RingBuffer support)
+*   **Linux Kernel**: 5.15+ (BPF RingBuffer support)
 *   **Toolchain**: `clang` / `llvm` (v12+), `libbpf`, `libelf`, `zlib`.
 
 ### Compilation
 ```bash
-# Standard Build
+# Compile the Kernel Program and User Daemon
 make clean && make all
 ```
 
-### Research Pipeline
+### Basic Usage
 ```bash
-# Automated Benchmark Execution (PCAP Ingestion)
-sudo python3 scripts/analysis/ebpf_full_experiment.py
+# Attach the extractor to a network interface (e.g., eth0)
+sudo ./build/loader eth0 > flow_features.csv
 ```
 
 ## ⚖️ License
@@ -50,5 +49,5 @@ Distributed under the **GNU General Public License v2.0**. See `LICENSE` for mor
 ---
 
 <p align="center">
-  <i>Developed for the Master's Thesis in Network Security and DDoS Mitigation.</i>
+  <i>A professional solution for high-fidelity network telemetry and security monitoring.</i>
 </p>
