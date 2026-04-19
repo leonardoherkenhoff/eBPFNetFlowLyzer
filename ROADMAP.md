@@ -1,51 +1,48 @@
-# 🗺️ Lynceus Project Roadmap
+# 🗺️ Lynceus: Matriz de Requisitos e Roadmap Técnico
 
-Este documento define a trajetória técnica e o histórico de marcos (Milestones) do motor **Lynceus**, focado exclusivamente na evolução como motor de extração de características (Features) em fluxo de rede.
-
----
-
-## 📅 Histórico de Milestones (Concluídos)
-
-| Milestone | Marco Técnico | Descrição |
-| :--- | :--- | :--- |
-| **v1.0.0** | Core Research | Lançamento inicial: Extrator Unificado Dual-Stack (IPv4/v6). |
-| **v1.1.0** | Protocol Expansion | Suporte total a ICMP e ICMPv6 para pesquisa de DDoS. |
-| **v1.4.1** | Granular Discovery | Implementação de dissecção de **ICMP ID** e extensões IPv6 aninhadas. |
-| **v1.6.0** | NTL/AL Hybrid | Fusão inicial NTL+AL com extração segmentada de fluxos. |
-| **v1.8.5** | High-Res Welford | Implementação de **Welford $O(1)$** e granularidade extrema ($N=1000$). |
-| **v2.0.0** | Lynceus Parallel | Arquitetura **Shared-Nothing** massivamente paralela para Xeon. |
-| **v2.2.0** | Ultimate Unified | Restauração de **Túneis (GRE/VXLAN)** e **VLAN QinQ**. |
-| **v2.4.0** | Flow-Level Logic | Transição definitiva para o **Paradigma de Fluxo** com $N=100$. |
+Este documento consolida todos os requisitos técnicos, arquiteturais e científicos do motor **Lynceus**, servindo como o registro definitivo da "Totalidade" exigida para a extração de características em fluxo.
 
 ---
 
-## ✅ Fase 1: Extração de Alta Performance (Status: 100% OK)
-*Objetivo: Integridade Estatística e Vazão de Extração.*
+## 🛡️ Matriz de Requisitos do Motor (Status Atual)
 
-- [x] **Arquitetura Shared-Nothing**: Isolamento N-Core para extração linear.
-- [x] **Matriz Científica (399 Features)**: Unificação NTLFlowLyzer + ALFlowLyzer.
-- [x] **Fidelidade de 4ª Ordem**: Algoritmo de Welford em $O(1)$.
-- [x] **Visibilidade Protocolar Universal**: Suporte a 11+ protocolos (incluindo GRE/VXLAN/QinQ).
-- [x] **Granularidade Segmentada**: Flush de características a cada 100 pacotes.
+### 1. Visibilidade Protocolar e Dissecção (Data Plane)
+- [x] **Dual-Stack Nativo**: Suporte completo a IPv4 e IPv6 (mapeamento 128-bit).
+- [x] **Dissecção L4 Granular**: Tracking detalhado de **TCP** (Flags, Window), **UDP** e **ICMP/ICMPv6**.
+- [x] **Diferenciação ICMP**: Separação de fluxos baseada em `Type`, `Code` e **Identifier (Echo ID)**.
+- [x] **Decapsulamento de Túneis**: Visibilidade do payload interno em fluxos **GRE** e **VXLAN**.
+- [x] **Traversal de Encapsulamento**: Suporte iterativo a **VLAN** e **QinQ (802.1Q/ad)**.
+- [ ] **Protocolos Adicionais**: Suporte profundo planejado para **SCTP**, **IGMP** e **SASP**.
+
+### 2. Engenharia de Características (399 Features - NTL+AL)
+- [x] **Paridade NTLFlowLyzer**: Extração de 348 características baseadas em estatísticas de rede.
+- [x] **Paridade ALFlowLyzer**: Extração de 51 características L7 não-redundantes.
+- [x] **Fidelidade Welford**: Cálculo estável de momentos de 4ª ordem (Média, Desvio Padrão, Variância, Assimetria, Curtose) em $O(1)$.
+- [x] **Histogramas de Payload**: 192 bins (64 por set: Total, Fwd, Bwd) para análise de distribuição de tamanho.
+- [x] **Inteligência L7**: Cálculo de **Entropia de Shannon** e metadados de **DNS** (Query/Answer counts).
+- [x] **Dinâmica de Janela**: Suíte estatística completa aplicada à janela TCP.
+
+### 3. Arquitetura e Performance (Control Plane)
+- [x] **Paradigma de Fluxo (Flow-Level)**: Agregação em RAM com exportação orientada a eventos.
+- [x] **Granularidade Extrema**: Segmentação de fluxos a cada **100 pacotes** para análise temporal de floods.
+- [x] **Shared-Nothing Parallelism**: Um worker por CPU, sem contenção de Mutex ou Mapas globais.
+- [x] **Afinidade NUMA**: Fixação de threads em cores físicos para maximizar cache locality.
+- [x] **I/O Particionado**: Escrita em CSVs isolados por core (Zero-Contention).
+- [x] **Gatilhos de Flush**: FIN/RST (Imediato), Idle Timeout (60s) e Volume (N=100).
 
 ---
 
-## 🚀 Fase 2: Engenharia de Características Complexas
-*Objetivo: Expansão da Densidade de Dados para ML.*
+## 🚀 Evolução Estratégica
 
-- [ ] **Fingerprinting L7 Nativo**: Extração de características de **HTTP/2** e **QUIC** (Stream IDs, Frame Types).
-- [ ] **Análise de Drift Temporal**: Evolução da entropia e momentos entre segmentos.
-- [ ] **Extração de Estados de Protocolo**: Features baseadas em transições (Latência Handshake, Retransmissão).
-- [ ] **Exportação para Pipelines ML**: Backend otimizado (ZMQ/Binary) para ingestão em Deep Learning.
+### Fase de Engenharia Complexa
+- [ ] **L7 Deep Fingerprinting**: Extração de features de frames **HTTP/2** e **QUIC**.
+- [ ] **Temporal Drift Analysis**: Cálculo da evolução de características entre segmentos.
+- [ ] **Backend de Exportação ML**: Ingestão binária direta (ZMQ/Arrow) para Deep Learning.
 
----
-
-## 🧠 Fase 3: Extração Híbrida e Resposta (MAPE-K)
-*Objetivo: Otimização da Extração via Inferência.*
-
-- [ ] **Seleção de Features no Kernel**: Filtros ML quantizados (XDP) para redução de dimensionalidade.
-- [ ] **Mitigação Baseada em Features**: Ações de rede acionadas por assinaturas em tempo real.
-- [ ] **Loop de Feedback MAPE-K**: Ajuste dinâmico da extração via confiança do classificador.
+### Fase de Resposta Autônoma (MAPE-K)
+- [ ] **Inferência ML no Kernel**: Classificação via modelos quantizados em XDP.
+- [ ] **Mitigação em Fluxo**: Ações de drop/redirect baseadas em assinaturas estatísticas.
+- [ ] **Feedback Loop**: Ajuste dinâmico da profundidade de extração.
 
 ---
 **Lynceus: Extração Precisa, Integridade Absoluta.**
