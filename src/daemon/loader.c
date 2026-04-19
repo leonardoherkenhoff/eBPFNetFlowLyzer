@@ -1,6 +1,23 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Parallel Flow-Level Extractor (v2.4-Fixed).
+ * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator.
+ * 
+ * @details 
+ * Implements a high-performance, multi-threaded flow extraction engine using 
+ * eBPF/XDP for data ingestion and a Shared-Nothing architecture in user-space.
+ * 
+ * Key Design Principles:
+ * 1. **Shared-Nothing Parallelism**: One worker thread per CPU core, pinned via 
+ *    affinity, with local Flow Tables to eliminate cache contention and mutex locks.
+ * 2. **Welford's Algorithm**: Numerically stable, $O(1)$ calculation of the 
+ *    first four statistical moments:
+ *    - Mean: $\bar{x}_n = \bar{x}_{n-1} + \frac{x_n - \bar{x}_{n-1}}{n}$
+ *    - Variance: $M_{2,n} = M_{2,n-1} + (x_n - \bar{x}_{n-1})(x_n - \bar{x}_n)$
+ * 3. **Segmented Flow-Level Export**: Agnostic aggregation with state-driven 
+ *    flushing (FIN/RST, Timeout, or Threshold-based segmentation).
+ * 
+ * @author Leonardo Herkenhoff (Senior Research Partner)
+ * @version 2.4-Standard
  */
 
 #define _GNU_SOURCE
@@ -23,25 +40,35 @@
 #include <errno.h>
 #include <sys/stat.h>
 
-#define FLOW_HASH_SIZE 131072
-#define IO_BUFFER_SIZE (8 * 1024 * 1024)
-#define IDLE_TIMEOUT_NS 60000000000ULL 
-#define IDLE_THRESHOLD 1.0
-#define SEGMENT_THRESHOLD 100 
-#define HIST_BINS 64
+/** @brief Global Configuration Constants */
+#define FLOW_HASH_SIZE 131072       /**< Optimized for 128k concurrent flows per core */
+#define IO_BUFFER_SIZE (8 * 1024 * 1024) /**< 8MB Per-Core Buffered I/O */
+#define IDLE_TIMEOUT_NS 60000000000ULL   /**< 60s Flow Expiration */
+#define IDLE_THRESHOLD 1.0               /**< 1s gap for Idle/Active state transition */
+#define SEGMENT_THRESHOLD 100            /**< Micro-batch granularity for DDoS research */
+#define HIST_BINS 64                    /**< 64-Bin Payload Histogram Resolution */
 
+/**
+ * @brief Canonical 5-Tuple Key for Flow Identification.
+ */
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
     uint16_t src_port; uint16_t dst_port;
     uint8_t protocol;
 } __attribute__((packed));
 
+/**
+ * @brief Static Flow Metadata for Lifecycle Tracking.
+ */
 struct flow_meta {
     uint64_t start_time;
     uint8_t ip_ver; uint16_t eth_proto;
     uint8_t src_mac[6]; uint8_t dst_mac[6];
 } __attribute__((packed));
 
+/**
+ * @brief Per-Packet Telemetry Event from eBPF RingBuffer.
+ */
 struct packet_event_t {
     struct flow_key key;
     struct flow_meta meta;
@@ -54,12 +81,29 @@ struct packet_event_t {
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
+/**
+ * @brief Welford Accumulator for On-line Moments Calculation.
+ */
 struct w_stat {
-    uint64_t n; double M1, M2, M3, M4; uint32_t max, min;
-    uint64_t hist[HIST_BINS];
+    uint64_t n;         /**< Sample Count */
+    double M1, M2, M3, M4; /**< Statistical Moments M1-M4 */
+    uint32_t max, min;  /**< Range Extremes */
+    uint64_t hist[HIST_BINS]; /**< Distribution Histogram */
 };
 
+/**
+ * @brief Initializes a Welford accumulator.
+ * @param w Pointer to the w_stat structure.
+ */
 static void w_init(struct w_stat *w) { memset(w, 0, sizeof(*w)); w->min = 0xFFFFFFFF; }
+
+/**
+ * @brief Updates Welford moments with a new sample.
+ * @details Implements numerically stable online calculation of Mean, Variance, 
+ * Skewness, and Kurtosis in $O(1)$.
+ * @param w Pointer to the accumulator.
+ * @param x The new sample value.
+ */
 static inline void w_update(struct w_stat *w, double x) {
     uint64_t n1 = w->n; w->n++;
     double delta = x - w->M1, delta_n = delta / w->n, delta_n2 = delta_n * delta_n, term1 = delta * delta_n * n1;
@@ -75,6 +119,9 @@ static inline double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / 
 static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
 static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
 
+/**
+ * @brief Comprehensive Flow State - The "399 Feature" Matrix.
+ */
 struct flow_state {
     struct flow_key key; struct flow_meta meta;
     struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat, active_s, idle_s, win_s;
@@ -86,6 +133,9 @@ struct flow_state {
     int active;
 };
 
+/**
+ * @brief Worker Thread Context for Partitioned I/O.
+ */
 struct worker_t {
     pthread_t thread; int rb_fd; struct ring_buffer *rb;
     struct flow_state *flow_table; FILE *out_f;
@@ -97,11 +147,17 @@ static int num_workers = 1;
 static volatile bool exiting = false;
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
+/**
+ * @brief Returns monotonic time in nanoseconds.
+ */
 static uint64_t get_nstime(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+/**
+ * @brief Calculates Shannon Entropy for the given byte sequence.
+ */
 static double calculate_entropy(const uint8_t *data, size_t len) {
     if (len == 0) return 0;
     uint64_t counts[256] = {0}; for (size_t i = 0; i < len; i++) counts[data[i]]++;
@@ -110,6 +166,12 @@ static double calculate_entropy(const uint8_t *data, size_t len) {
     return ent;
 }
 
+/**
+ * @brief Serializes the flow state to CSV at the end of a lifecycle.
+ * @param w Pointer to the worker context.
+ * @param s Pointer to the flow state.
+ * @param ts_ns Timestamp of the flush event.
+ */
 static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns) {
     char sip[64], dip[64];
     if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &s->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &s->key.dst_ip[12], dip, 64); }
@@ -126,6 +188,9 @@ static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns)
     if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
 }
 
+/**
+ * @brief eBPF Event Handler - Per-Packet Ingestion Callback.
+ */
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz; struct worker_t *w = ctx; const struct packet_event_t *e = data;
     uint32_t h = 0; const uint8_t *p = (const uint8_t *)&e->key;
@@ -168,6 +233,9 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
+/**
+ * @brief Main Worker Loop - Polls RingBuffer and performs Timeout Scans.
+ */
 void *worker_fn(void *arg) {
     struct worker_t *w = arg; cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 256, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
@@ -209,7 +277,7 @@ int main(int argc, char **argv) {
         workers[i].id = i; workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Flow-Level Paradigm Ready)\n", num_workers);
+    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scholarly Orchestrator Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));

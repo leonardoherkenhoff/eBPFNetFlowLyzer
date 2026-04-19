@@ -1,13 +1,24 @@
 /**
  * @file main.bpf.c
- * @brief Lynceus Ultimate Data Plane - Unified Protocol Dissector (v2.2).
+ * @brief Lynceus Data Plane - High-Fidelity Unified Protocol Dissector.
  * 
  * @details 
- * Versão final de alta fidelidade integrando:
- * 1. Decapsulamento de Túneis (GRE, VXLAN).
- * 2. Dissecção Granular ICMP (Type/Code + Echo ID).
- * 3. Traversal VLAN QinQ (802.1Q/ad).
- * 4. L7 Hints: DNS Query Counts e Payload Entropy.
+ * Implements a research-grade packet interception pipeline in kernel-space 
+ * using eBPF/XDP. Designed for absolute protocol visibility and high-throughput 
+ * telemetry generation.
+ * 
+ * Capabilities:
+ * 1. **Universal Dual-Stack**: Native support for IPv4 and IPv6.
+ * 2. **Multi-Protocol Dissection**: TCP (Flags/Win), UDP, ICMP/v6 (Type/Code/ID).
+ * 3. **Tunneling & Encapsulation**: 
+ *    - Recursive decapsulation for GRE and VXLAN.
+ *    - Iterative VLAN QinQ (802.1Q/ad) traversal.
+ * 4. **L7 Metadata Hints**: 
+ *    - DNS Answer Counts (RFC 1035).
+ *    - Shannon Entropy capture for first-64 bytes.
+ * 
+ * @author Leonardo Herkenhoff (Senior Research Partner)
+ * @version 2.4-Standard
  */
 
 #include "vmlinux.h"
@@ -15,24 +26,34 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
+/** @brief Protocol Constants */
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define IPPROTO_GRE 47
 #define VXLAN_PORT 4789
 #define PAYLOAD_HINT_SIZE 64
 
+/**
+ * @brief Flow Identification Key.
+ */
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
     uint16_t src_port; uint16_t dst_port;
     uint8_t protocol;
 } __attribute__((packed));
 
+/**
+ * @brief Immutable Flow Metadata.
+ */
 struct flow_meta {
     uint64_t start_time;
     uint8_t ip_ver; uint16_t eth_proto;
     uint8_t src_mac[6]; uint8_t dst_mac[6];
 } __attribute__((packed));
 
+/**
+ * @brief Telemetry Event Record.
+ */
 struct packet_event_t {
     struct flow_key key;
     struct flow_meta meta;
@@ -45,6 +66,9 @@ struct packet_event_t {
     uint8_t payload_hint[PAYLOAD_HINT_SIZE];
 } __attribute__((packed));
 
+/** 
+ * @brief BPF Maps for State and Communication.
+ */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 131072);
@@ -59,6 +83,20 @@ struct {
     __type(value, int);
 } pkt_ringbuf_map SEC(".maps");
 
+/**
+ * @brief Recursive L3 Parser for Nested Protocols.
+ * @param data Data pointer.
+ * @param data_end End of data pointer.
+ * @param proto EtherType or Inner Protocol.
+ * @param src Destination for source IP.
+ * @param dst Destination for destination IP.
+ * @param ver Destination for IP version.
+ * @param l4_p Destination for L4 protocol.
+ * @param l4_h Destination for L4 header pointer.
+ * @param h_len Destination for header length.
+ * @param ttl Destination for TTL/Hop Limit.
+ * @return 0 on success, -1 on failure.
+ */
 static __always_inline int parse_l3(void *data, void *data_end, uint16_t proto, 
                                    uint8_t *src, uint8_t *dst, uint8_t *ver, uint8_t *l4_p, void **l4_h, uint16_t *h_len, uint8_t *ttl) {
     if (proto == bpf_htons(ETH_P_IP)) {
@@ -78,6 +116,10 @@ static __always_inline int parse_l3(void *data, void *data_end, uint16_t proto,
     return -1;
 }
 
+/**
+ * @brief Main XDP Ingress Program.
+ * @details Implements iterative VLAN traversal and recursive tunnel decapsulation.
+ */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
@@ -88,7 +130,7 @@ int xdp_prog(struct xdp_md *ctx) {
     uint16_t eth_proto = eth->h_proto;
     void *l3_hdr = (void *)(eth + 1);
 
-    /* 1. VLAN QinQ Traversal */
+    /* 1. VLAN QinQ Traversal (Iterative) */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == bpf_htons(0x8100) || eth_proto == bpf_htons(0x88A8)) {
@@ -126,7 +168,7 @@ int xdp_prog(struct xdp_md *ctx) {
     } else if (l4_p == 17) { /* UDP */
         struct udphdr *udp = l4_h; if ((void *)(udp + 1) <= data_end) {
             sport = udp->source; dport = udp->dest; h_len += 8;
-            /* VXLAN Decapsulation */
+            /* VXLAN Decapsulation (Recursive) */
             if (dport == bpf_htons(VXLAN_PORT)) {
                 struct { uint32_t f; uint32_t v; } *vx = (void *)(udp + 1);
                 if ((void *)(vx + 1) <= data_end) {
@@ -140,7 +182,7 @@ int xdp_prog(struct xdp_md *ctx) {
                     }
                 }
             }
-            /* DNS Hint */
+            /* DNS Telemetry Hint */
             if (sport == bpf_htons(53) || dport == bpf_htons(53)) {
                 void *dns = l4_h + 8; if (dns + 8 <= data_end) dns_ans = bpf_ntohs(*(uint16_t *)(dns + 6));
             }
@@ -148,7 +190,7 @@ int xdp_prog(struct xdp_md *ctx) {
     } else if (l4_p == 1 || l4_p == 58) { /* ICMP/v6 */
         struct icmphdr *icmp = l4_h; if ((void *)(icmp + 1) <= data_end) {
             sport = icmp->type; dport = icmp->code; h_len += 8;
-            /* ICMP Echo ID Granularity */
+            /* ICMP Echo ID Flow Separation */
             if (icmp->type == 8 || icmp->type == 0 || icmp->type == 128 || icmp->type == 129) {
                 struct { uint8_t t; uint8_t c; uint16_t k; uint16_t id; uint16_t s; } *echo = l4_h;
                 if ((void *)(echo + 1) <= data_end) sport = echo->id;
