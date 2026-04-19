@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-/**
- * eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.11)
- * -----------------------------------------------------------
- * Research Methodology Fixes:
- * 1. Post-Extraction Flush Resilience: Increased timeout to 300s for 48-core buffer flushing.
- * 2. Path Normalization: Resolved the '.' suffix in interim directories.
- * 3. Injection Counter: Improved tcpreplay output parsing to ensure reporting accuracy.
- */
+"""
+eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.12)
+-----------------------------------------------------------
+v1.9.12 Iterative Storage Management:
+- "Extract-Label-Purge" Strategy: Integrates labelling and cleanup into the loop.
+- Ensures the 180GB benchmark fits in the 586GB partition.
+"""
 
 import subprocess
 import os
@@ -23,6 +22,7 @@ DATA_RAW = os.path.join(BASE_DIR, "data/raw")
 DATA_INTERIM = os.path.join(BASE_DIR, "data/interim/EBPF_RAW")
 LOADER_BIN = os.path.join(BASE_DIR, "build/loader")
 WORKER_DATA_DIR = os.path.join(BASE_DIR, "worker_telemetry") 
+LABELER_SCRIPT = os.path.join(BASE_DIR, "scripts/preprocessing/ebpf_labeler.py")
 
 # --- Research Constraints ---
 EXPERIMENT_ORDER = ["PCAPv6", "PCAP"]
@@ -32,13 +32,11 @@ def process_pcap_dir(pcap_dir, category):
     Orchestrates the extraction of a single PCAP directory.
     """
     rel_path = os.path.relpath(pcap_dir, os.path.join(DATA_RAW, category))
-    # Normalize path to avoid trailing dots
     output_dir = os.path.normpath(os.path.join(DATA_INTERIM, category, rel_path))
     os.makedirs(output_dir, exist_ok=True)
     
     pcaps = glob.glob(os.path.join(pcap_dir, "*.pcap*"))
     if not pcaps:
-        print(f"   ⚠️ No PCAPs found in {pcap_dir}")
         return
 
     metrics_csv = os.path.join(output_dir, "resource_metrics.csv")
@@ -87,7 +85,7 @@ def process_pcap_dir(pcap_dir, category):
         log_thread = threading.Thread(target=stream_logs, args=(proc_loader, loader_log_path), daemon=True)
         log_thread.start()
         
-        time.sleep(5) # Grace period for 48-core init
+        time.sleep(5) 
         
         # --- Step 3: Resource Monitoring ---
         monitor_script = "scripts/testbed/monitor.py"
@@ -101,11 +99,9 @@ def process_pcap_dir(pcap_dir, category):
         
         for p in pcaps:
             print(f"   Streaming: {os.path.basename(p)}")
-            # -t allows for top-speed replay
             cmd = f"sudo tcpreplay -i veth0 -t {p} 2>&1"
             try:
                 res = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=True)
-                # Improved regex for tcpreplay output
                 matches = re.findall(r"(\d+)\s+packets", res.stdout)
                 if matches:
                     total_packets += int(matches[0])
@@ -116,17 +112,16 @@ def process_pcap_dir(pcap_dir, category):
         pps = total_packets / elapsed if elapsed > 0 else 0
         
         # --- Step 5: Termination & Synchronization ---
-        print("   🛑 Terminating Loader and Monitoring (Syncing Buffers)...")
+        print("   🛑 Terminating Loader (Syncing Buffers)...")
         if proc_mon:
             proc_mon.terminate()
             proc_mon.wait()
         
         subprocess.run(["sudo", "kill", "-INT", str(proc_loader.pid)], check=False)
         try:
-            # INCREASED TIMEOUT to 300s for massive partitioned flushes
             proc_loader.wait(timeout=300)
         except subprocess.TimeoutExpired:
-            print("   ⚠️ Loader timed out during flush. Force killing...")
+            print("   ⚠️ Loader timed out. Force killing...")
             subprocess.run(["sudo", "kill", "-9", str(proc_loader.pid)], check=False)
             
         log_thread.join(timeout=10)
@@ -139,6 +134,11 @@ def process_pcap_dir(pcap_dir, category):
                 shutil.move(wf, output_dir)
             except Exception as e:
                 print(f"   ⚠️ Failed to move {os.path.basename(wf)}: {e}")
+        
+        # --- NEW v1.9.12: Iterative Labeling and Purging ---
+        print(f"   🏷️  Running Iterative Labeling for {experiment_name}...")
+        label_cmd = f"python3 {LABELER_SCRIPT} --path {output_dir} --cleanup"
+        subprocess.run(label_cmd, shell=True, check=False)
             
     finally:
         subprocess.run(["sudo", "ip", "link", "delete", "veth0"], check=False, stderr=subprocess.DEVNULL)
@@ -146,7 +146,7 @@ def process_pcap_dir(pcap_dir, category):
     summary = {
         "experiment": experiment_name, "packets_sent": total_packets,
         "time_seconds": elapsed, "pps": pps, "timestamp": time.ctime(),
-        "partitioned_io": True, "worker_count": len(worker_files) if 'worker_files' in locals() else 0
+        "iterative_cleanup": True
     }
     with open(os.path.join(output_dir, "summary.json"), 'w') as f:
         json.dump(summary, f, indent=4)
@@ -155,7 +155,7 @@ def process_pcap_dir(pcap_dir, category):
 
 def main():
     """Entry point for the Extraction Wrapper."""
-    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.11) ===")
+    print("=== eBPFNetFlowLyzer Research Pipeline (v1.9.12 Iterative) ===")
     if not os.path.exists(LOADER_BIN):
         print(f"❌ Error: {LOADER_BIN} not found. Run 'make all' first.")
         return
