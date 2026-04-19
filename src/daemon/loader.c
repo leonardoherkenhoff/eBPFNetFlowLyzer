@@ -135,11 +135,22 @@ static int raw_pkt_map_fd = -1;
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
 /** @brief Periodically logs kernel-side diagnostic counters to stderr. */
-void print_stats() {
+void print_stats(struct bpf_object *obj) {
     uint32_t key = 0; uint64_t drops = 0, raw = 0;
     if (drop_map_fd >= 0) bpf_map_lookup_elem(drop_map_fd, &key, &drops);
     if (raw_pkt_map_fd >= 0) bpf_map_lookup_elem(raw_pkt_map_fd, &key, &raw);
-    fprintf(stderr, "\n📊 [Stats] Total Packets: %lu | RingBuffer Drops: %lu\n", raw, drops);
+    fprintf(stderr, "\n📊 [Diagnostic] Kernel Packets: %lu | RingBuffer Drops: %lu\n", raw, drops);
+    
+    int proto_fd = bpf_object__find_map_fd_by_name(obj, "proto_stats");
+    if (proto_fd >= 0) {
+        uint16_t p_key = 0, next_p_key; uint64_t val;
+        fprintf(stderr, "   └─ Protocol Distribution:\n");
+        while (bpf_map_get_next_key(proto_fd, &p_key, &next_p_key) == 0) {
+            bpf_map_lookup_elem(proto_fd, &next_p_key, &val);
+            fprintf(stderr, "      - Proto 0x%04x: %lu packets\n", next_p_key, val);
+            p_key = next_p_key;
+        }
+    }
 }
 
 /** @brief Final CSV export of all tracked flows. */
@@ -275,7 +286,7 @@ int main(int argc, char **argv) {
     /* Event loop */
     while (!exiting) ring_buffer__poll(rb, 100);
     
-    print_stats(); export_all_flows();
+    print_stats(obj); export_all_flows();
     
     ring_buffer__free(rb); bpf_object__close(obj);
     return 0;
