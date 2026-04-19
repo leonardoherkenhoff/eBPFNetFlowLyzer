@@ -16,6 +16,9 @@
 #define IPPROTO_ICMPV6 58
 #define IPPROTO_GRE 47
 #define IPPROTO_FRAGMENT 44
+#define IPPROTO_AH 51
+#define IPPROTO_ESP 50
+#define IPPROTO_NONE 59
 #define VXLAN_PORT 4789
 #define MAX_ENTRIES 524288 
 
@@ -96,18 +99,22 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
         
-        /* Mathematically Correct IPv6 Extension Skip (Verifier-Safe) */
+        /* Deep Extension Traversal (Verifier-Safe) */
         #pragma unroll
-        for (int i = 0; i < 2; i++) {
-            if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44) {
+        for (int i = 0; i < 4; i++) {
+            if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44 || *l4_proto == 51) {
                 struct { __u8 next; __u8 len; } *ext = next;
                 if ((void *)(ext + 1) > data_end) break;
+                __u8 cur_proto = *l4_proto;
                 *l4_proto = ext->next;
-                // Total len = (ext->len + 1) * 8 octets.
-                // We mask len to satisfy the verifier's bound tracking.
-                __u16 delta = (ext->len + 1) << 3;
-                if (delta > 128) delta = 128; // Hard limit for verifier safety
-                next += delta;
+                
+                if (cur_proto == 44) {
+                    next += 8; /* Fragment Header is always 8 bytes */
+                } else if (cur_proto == 51) {
+                    next += (ext->len + 2) << 2; /* AH length is complex, but this is standard */
+                } else {
+                    next += (ext->len + 1) << 3; /* HbH, Dest, Routing */
+                }
             } else break;
         }
         *l4_hdr = next;
@@ -163,7 +170,6 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    /* Handle LLC/SNAP */
     if (eth_proto < 1536) {
         if (l3_hdr + 8 > data_end) return XDP_PASS;
         __u8 *llc = l3_hdr;
@@ -173,7 +179,6 @@ int xdp_prog(struct xdp_md *ctx) {
         } else return XDP_PASS;
     }
 
-    /* Handle Multi-VLAN Tagging (QinQ) */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
@@ -226,11 +231,13 @@ int xdp_prog(struct xdp_md *ctx) {
         if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4) - head_len;
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - head_len;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
-    } else if (l4_proto == IPPROTO_FRAGMENT) {
-        sport = 0; dport = 0; head_len = 8;
-        pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - 8;
-        ttl = ((struct ipv6hdr *)l3_hdr)->hop_limit;
-    } else return XDP_PASS;
+    } else {
+        /* Capture unknown L4 protocols as generic flows */
+        sport = 0; dport = 0; head_len = 0;
+        if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4);
+        else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len);
+        ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
+    }
 
     struct flow_key_t k = {0};
     __builtin_memcpy(k.src_ip, src_ip, 16); __builtin_memcpy(k.dst_ip, dst_ip, 16);
