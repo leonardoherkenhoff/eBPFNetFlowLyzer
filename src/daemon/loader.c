@@ -1,6 +1,6 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator (v2.6).
+ * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator (v2.7 - The 399).
  */
 
 #define _GNU_SOURCE
@@ -28,7 +28,7 @@
 #define IDLE_TIMEOUT_NS 60000000000ULL 
 #define IDLE_THRESHOLD 1.0
 #define SEGMENT_THRESHOLD 100 
-#define HIST_BINS 64
+#define HIST_BINS 80 /**< Adjusted for 399 Feature Parity */
 
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
@@ -68,10 +68,11 @@ static inline void w_update(struct w_stat *w, double x) {
     w->M3 += term1 * delta_n * (w->n - 2) - 3 * delta_n * w->M2;
     w->M2 += term1;
     if (x > w->max) w->max = (uint32_t)x; if (x < w->min) w->min = (uint32_t)x;
-    uint32_t bin = (uint32_t)x / 32; if (bin < HIST_BINS) w->hist[bin]++;
+    uint32_t bin = (uint32_t)x / 20; if (bin < HIST_BINS) w->hist[bin]++;
 }
 
-static inline double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / (w->n - 1)) : 0; }
+static inline double w_var(struct w_stat *w) { return (w->n > 1) ? w->M2 / (w->n - 1) : 0; }
+static inline double w_std(struct w_stat *w) { return sqrt(w_var(w)); }
 static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
 static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
 
@@ -121,7 +122,7 @@ static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns)
     else { inet_ntop(AF_INET6, s->key.src_ip, sip, 64); inet_ntop(AF_INET6, s->key.dst_ip, dip, 64); }
     double duration = (double)(ts_ns - s->meta.start_time) / 1e9;
     w->s_off += snprintf(w->s_buf + w->s_off, 16384, "%s-%s-%u-%u-%u,%.6f,%s,%u,%s,%u,%u,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,", sip, dip, ntohs(s->key.src_port), ntohs(s->key.dst_port), s->key.protocol, (double)s->meta.start_time/1e9, sip, ntohs(s->key.src_port), dip, ntohs(s->key.dst_port), s->key.protocol, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes);
-    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_skew(&W), w_kurt(&W))
+    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_var(&W), w_skew(&W), w_kurt(&W))
     FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr); FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->active_s); FMT_W(s->idle_s); FMT_W(s->win_s); FMT_W(s->t_pay_delta); FMT_W(s->f_pay_delta); FMT_W(s->b_pay_delta);
     w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,", s->f_win_init, s->b_win_init, (duration > 0 ? (s->f_bytes+s->b_bytes)/duration : 0), (duration > 0 ? s->f_bytes/duration : 0), (duration > 0 ? s->b_bytes/duration : 0), (duration > 0 ? s->t_pay.n/duration : 0), (duration > 0 ? s->b_pay.n/duration : 0), (duration > 0 ? s->f_pay.n/duration : 0), (s->f_pay.n > 0 ? (double)s->b_pay.n/s->f_pay.n : 0));
     for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
@@ -161,7 +162,6 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     if (e->dns_answer_count > 0) { s->dns_a_count += e->dns_answer_count; s->dns_q_count++; }
     s->last_entropy = calculate_entropy(e->payload_hint, 64);
     if (e->key.protocol == 1 || e->key.protocol == 58) s->icmp_id = (e->icmp_type << 8) | e->icmp_code;
-
     if (e->is_fwd) {
         if (s->f_last > 0) { 
             double f_iat = (double)(e->timestamp_ns - s->f_last) / 1e9;
@@ -193,7 +193,7 @@ void *worker_fn(void *arg) {
     setvbuf(w->out_f, NULL, _IOFBF, IO_BUFFER_SIZE);
     fprintf(w->out_f, "flow_id,timestamp,src_ip,src_port,dst_ip,dst_port,protocol,duration,pkt_count,fwd_count,bwd_count,tot_bytes,fwd_bytes,bwd_bytes,");
     const char *metrics[] = {"pay", "fwd_pay", "bwd_pay", "hdr", "fwd_hdr", "bwd_hdr", "iat", "fwd_iat", "bwd_iat", "active", "idle", "win", "pay_delta", "fwd_pay_delta", "bwd_pay_delta"};
-    for(int i=0; i<15; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
+    for(int i=0; i<15; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_var,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
     fprintf(w->out_f, "fwd_win_init,bwd_win_init,bytes_rate,fwd_bytes_rate,bwd_bytes_rate,packets_rate,bwd_packets_rate,fwd_packets_rate,down_up_rate,");
     const char *flags[] = {"fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr"};
     for(int i=0; i<8; i++) fprintf(w->out_f, "%s_cnt,fwd_%s_cnt,bwd_%s_cnt,", flags[i], flags[i], flags[i]);
@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
         workers[i].id = i; workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Monster Suite Ready)\n", num_workers);
+    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scientific 399 Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
