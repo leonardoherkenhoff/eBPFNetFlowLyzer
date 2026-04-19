@@ -295,7 +295,9 @@ int main(int argc, char **argv) {
     if (!obj || bpf_object__load(obj)) return 1;
     int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
     for (int i = 0; i < num_workers; i++) {
-        workers[i].id = i; workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
+        workers[i].id = i; 
+        workers[i].rb_fd = bpf_create_map(BPF_MAP_TYPE_RINGBUF, 0, 0, 32 * 1024 * 1024, 0);
+        if (workers[i].rb_fd < 0) { fprintf(stderr, "❌ Failed to create RingBuffer for core %d\n", i); return 1; }
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
     fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scientific 399 Ready)\n", num_workers);
