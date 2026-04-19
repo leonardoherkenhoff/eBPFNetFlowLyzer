@@ -2,11 +2,10 @@
  * @file main.bpf.c
  * @brief Data Plane Core - eBPF/XDP High-Performance Feature Extractor.
  * 
- * This module implements the kernel-space packet parsing and flow aggregation 
- * logic. It supports Dual-Stack (IPv4/IPv6), VLAN tagging, and advanced 
- * L4/L7 feature extraction.
+ * Optimized for large-scale research datasets. Implements segmented flow 
+ * extraction to ensure granular ML feature sets even during massive floods.
  * 
- * @version 1.4.6
+ * @version 1.4.7
  */
 
 #include "vmlinux.h"
@@ -14,41 +13,27 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
-/* Standard Protocol Definitions */
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define IPPROTO_ICMP 1
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 #define IPPROTO_ICMPV6 58
-#define IPPROTO_GRE 47
 #define IPPROTO_FRAGMENT 44
 #define IPPROTO_AH 51
 #define IPPROTO_ESP 50
 #define IPPROTO_NONE 59
 
-/* Application Constants */
-#define VXLAN_PORT 4789
 #define MAX_ENTRIES 524288 
+#define FLOW_MAX_PACKETS 10000 /* Segment flows every 10k packets for ML granularity */
 
-/**
- * @enum error_code_t
- * @brief Diagnostic error codes for research-grade debugging.
- */
+/** @enum error_code_t */
 enum error_code_t {
-    ERR_L2_BOUNDS = 1,     /**< Ethernet/VLAN parsing out of bounds. */
-    ERR_L3_BOUNDS = 2,     /**< IP header parsing out of bounds. */
-    ERR_L3_UNKNOWN = 3,    /**< Unsupported EtherType (non-IP). */
-    ERR_L4_BOUNDS = 4,     /**< L4 header parsing out of bounds. */
-    ERR_EXT_BOUNDS = 5,    /**< IPv6 Extension header out of bounds. */
-    ERR_RINGBUF_FULL = 6,  /**< RingBuffer congestion/overflow. */
-    ERR_MAP_FULL = 7       /**< Flow state cache capacity exceeded. */
+    ERR_L2_BOUNDS = 1, ERR_L3_BOUNDS = 2, ERR_L3_UNKNOWN = 3,
+    ERR_L4_BOUNDS = 4, ERR_EXT_BOUNDS = 5, ERR_RINGBUF_FULL = 6
 };
 
-/**
- * @struct flow_event_t
- * @brief Telemetry event structure for asynchronous export.
- */
+/** @struct flow_event_t */
 struct flow_event_t {
     __u8 src_ip[16]; __u8 dst_ip[16];
     __u16 src_port; __u16 dst_port;
@@ -60,30 +45,23 @@ struct flow_event_t {
     __u8 dns_payload_raw[256];
 } __attribute__((packed));
 
-/**
- * @struct flow_key_t
- * @brief 5-tuple lookup key.
- */
+/** @struct flow_key_t */
 struct flow_key_t {
     __u8 src_ip[16]; __u8 dst_ip[16];
     __u16 src_port; __u16 dst_port;
     __u8 protocol;
 } __attribute__((packed));
 
-/**
- * @struct flow_stats_t
- * @brief Stateful flow counters.
- */
+/** @struct flow_stats_t */
 struct flow_stats_t {
-    __u64 total_bytes __attribute__((aligned(8)));
-    __u64 packet_count __attribute__((aligned(8)));
-    __u64 start_time_ns __attribute__((aligned(8)));
-    __u64 last_time_ns __attribute__((aligned(8)));
+    __u64 total_bytes;
+    __u64 packet_count;
+    __u64 start_time_ns;
+    __u64 last_time_ns;
 } __attribute__((packed));
 
 /* --- BPF Maps --- */
 
-/** @brief Counter for RingBuffer drops. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -91,7 +69,6 @@ struct {
     __type(value, __u64);
 } drop_counter SEC(".maps");
 
-/** @brief Diagnostic map for error tracking. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 64);
@@ -99,7 +76,6 @@ struct {
     __type(value, __u64);
 } error_stats SEC(".maps");
 
-/** @brief Global protocol distribution map. */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 256);
@@ -107,7 +83,6 @@ struct {
     __type(value, __u64);
 } proto_stats SEC(".maps");
 
-/** @brief Total packet counter. */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
@@ -115,13 +90,11 @@ struct {
     __type(value, __u64);
 } raw_pkt_count SEC(".maps");
 
-/** @brief High-speed telemetry Ring Buffer. */
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024 * 1024); 
 } flows_ringbuf SEC(".maps");
 
-/** @brief Stateful flow cache. */
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAX_ENTRIES);
@@ -129,19 +102,14 @@ struct {
     __type(value, struct flow_stats_t);
 } flow_state_cache SEC(".maps");
 
-/* --- Internal Helpers --- */
+/* --- Helpers --- */
 
-/** @brief Increments diagnostic error counters. */
 static __always_inline void count_error(__u32 code) {
     __u64 *val = bpf_map_lookup_elem(&error_stats, &code);
     if (val) __sync_fetch_and_add(val, 1);
     else { __u64 one = 1; bpf_map_update_elem(&error_stats, &code, &one, BPF_ANY); }
 }
 
-/**
- * @brief Parses L3 headers and maps IPs into 128-bit space.
- * @return 0 on success, or an error code from error_code_t.
- */
 static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto, 
                                    __u8 *src_ip, __u8 *dst_ip, __u8 *l4_proto, __u8 *ip_ver, void **l4_hdr) {
     if (eth_proto == bpf_htons(ETH_P_IP)) {
@@ -161,7 +129,6 @@ static __always_inline int parse_l3(void *data, void *data_end, __u16 eth_proto,
         __builtin_memcpy(src_ip, &ip6->saddr, 16);
         __builtin_memcpy(dst_ip, &ip6->daddr, 16);
         void *next = data + sizeof(struct ipv6hdr);
-        
         #pragma unroll
         for (int i = 0; i < 4; i++) {
             if (*l4_proto == 0 || *l4_proto == 60 || *l4_proto == 43 || *l4_proto == 44 || *l4_proto == 51) {
@@ -213,9 +180,6 @@ static __always_inline void parse_sni(void *payload, void *data_end, __u8 *sni_o
     }
 }
 
-/**
- * @brief XDP Ingestion Hook.
- */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
@@ -230,7 +194,6 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    /* LLC/SNAP Extraction */
     if (eth_proto < 1536) {
         if (l3_hdr + 8 > data_end) { count_error(ERR_L2_BOUNDS); return XDP_PASS; }
         __u8 *llc = l3_hdr;
@@ -240,7 +203,6 @@ int xdp_prog(struct xdp_md *ctx) {
         } else { count_error(ERR_L3_UNKNOWN); return XDP_PASS; }
     }
 
-    /* QinQ Support */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
@@ -294,7 +256,6 @@ int xdp_prog(struct xdp_md *ctx) {
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len) - head_len;
         ttl = (ip_ver == 4) ? ((struct iphdr *)l3_hdr)->ttl : ((struct ipv6hdr *)l3_hdr)->hop_limit;
     } else {
-        /* Protocol-Agnostic capture */
         sport = 0; dport = 0; head_len = 0;
         if (ip_ver == 4) pay_len = bpf_ntohs(((struct iphdr *)l3_hdr)->tot_len) - (((struct iphdr *)l3_hdr)->ihl * 4);
         else pay_len = bpf_ntohs(((struct ipv6hdr *)l3_hdr)->payload_len);
@@ -310,18 +271,34 @@ int xdp_prog(struct xdp_md *ctx) {
         __sync_fetch_and_add(&s->packet_count, 1);
         __sync_fetch_and_add(&s->total_bytes, pay_len);
         s->last_time_ns = bpf_ktime_get_ns();
+        
+        /* Granular Segmentation: If flow is too large, export and reset to provide more ML samples */
+        if (s->packet_count >= FLOW_MAX_PACKETS) {
+            struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
+            if (ev) {
+                __builtin_memcpy(ev->src_ip, src_ip, 16); __builtin_memcpy(ev->dst_ip, dst_ip, 16);
+                ev->src_port = sport; ev->dst_port = dport; ev->protocol = l4_proto; ev->ip_ver = ip_ver;
+                ev->payload_length = pay_len; ev->header_length = head_len;
+                ev->tcp_flags = (__u8)flags; ev->timestamp_ns = bpf_ktime_get_ns();
+                ev->ttl = ttl; ev->window_size = win;
+                bpf_ringbuf_submit(ev, 0);
+            }
+            /* Reset stats for next segment */
+            s->packet_count = 0; s->total_bytes = 0; s->start_time_ns = bpf_ktime_get_ns();
+        }
     } else {
         struct flow_stats_t ns = { .total_bytes = pay_len, .packet_count = 1, .start_time_ns = bpf_ktime_get_ns() };
         ns.last_time_ns = ns.start_time_ns;
         bpf_map_update_elem(&flow_state_cache, &k, &ns, BPF_ANY);
     }
 
+    /* Asynchronous event for every packet (Real-time telemetry) */
     struct flow_event_t *ev = bpf_ringbuf_reserve(&flows_ringbuf, sizeof(*ev), 0);
     if (!ev) { count_error(ERR_RINGBUF_FULL); return XDP_PASS; }
     __builtin_memcpy(ev->src_ip, src_ip, 16); __builtin_memcpy(ev->dst_ip, dst_ip, 16);
     ev->src_port = sport; ev->dst_port = dport; ev->protocol = l4_proto; ev->ip_ver = ip_ver;
     ev->payload_length = pay_len; ev->header_length = head_len;
-    ev->tcp_flags = (__u8)flags; ev->is_tunneled = is_tun; ev->timestamp_ns = bpf_ktime_get_ns();
+    ev->tcp_flags = (__u8)flags; ev->timestamp_ns = bpf_ktime_get_ns();
     ev->ttl = ttl; ev->window_size = win;
     __builtin_memcpy(ev->sni_hostname, sni, 64);
     if (l4_proto == 17 && (bpf_ntohs(sport) == 53 || bpf_ntohs(dport) == 53)) {

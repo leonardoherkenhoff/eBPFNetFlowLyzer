@@ -18,10 +18,9 @@
 #include <time.h>
 #include "uthash.h"
 
-/** @brief Mirror of error codes in main.bpf.c. */
 enum error_code_t {
     ERR_L2_BOUNDS = 1, ERR_L3_BOUNDS = 2, ERR_L3_UNKNOWN = 3,
-    ERR_L4_BOUNDS = 4, ERR_EXT_BOUNDS = 5, ERR_RINGBUF_FULL = 6, ERR_MAP_FULL = 7
+    ERR_L4_BOUNDS = 4, ERR_EXT_BOUNDS = 5, ERR_RINGBUF_FULL = 6
 };
 
 struct flow_event_t {
@@ -86,28 +85,28 @@ static int raw_pkt_map_fd = -1;
 
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
-/** @brief Advanced forensic diagnostic printer. */
+/** @brief Diagnostic logs are directed to stderr to prevent CSV pollution. */
 void print_stats(struct bpf_object *obj) {
     uint32_t key = 0; uint64_t drops = 0, raw = 0;
     if (drop_map_fd >= 0) bpf_map_lookup_elem(drop_map_fd, &key, &drops);
     if (raw_pkt_map_fd >= 0) bpf_map_lookup_elem(raw_pkt_map_fd, &key, &raw);
     
-    printf("\n📊 [Diagnostic] Kernel Packets: %lu | RingBuffer Drops: %lu\n", raw, drops);
+    fprintf(stderr, "\n📊 [Diagnostic] Kernel Packets: %lu | RingBuffer Drops: %lu\n", raw, drops);
     
     int err_fd = bpf_object__find_map_fd_by_name(obj, "error_stats");
     if (err_fd >= 0) {
-        printf("   ⚠️ [Parser Errors]:\n");
+        fprintf(stderr, "   ⚠️ [Parser Errors]:\n");
         uint32_t e_key = 0, next_e_key; uint64_t e_val;
         while (bpf_map_get_next_key(err_fd, &e_key, &next_e_key) == 0) {
             bpf_map_lookup_elem(err_fd, &next_e_key, &e_val);
             const char *msg = "Unknown";
-            if (next_e_key == ERR_L2_BOUNDS) msg = "L2 Bounds (Truncated)";
-            else if (next_e_key == ERR_L3_BOUNDS) msg = "L3 Bounds (Truncated IP)";
+            if (next_e_key == ERR_L2_BOUNDS) msg = "L2 Bounds";
+            else if (next_e_key == ERR_L3_BOUNDS) msg = "L3 Bounds";
             else if (next_e_key == ERR_L3_UNKNOWN) msg = "Unknown EtherType";
-            else if (next_e_key == ERR_L4_BOUNDS) msg = "L4 Bounds (Truncated Proto)";
+            else if (next_e_key == ERR_L4_BOUNDS) msg = "L4 Bounds";
             else if (next_e_key == ERR_EXT_BOUNDS) msg = "IPv6 Ext Bounds";
             else if (next_e_key == ERR_RINGBUF_FULL) msg = "RingBuffer Full";
-            printf("      - %s (Code %u): %lu occurrences\n", msg, next_e_key, e_val);
+            fprintf(stderr, "      - %s (Code %u): %lu\n", msg, next_e_key, e_val);
             e_key = next_e_key;
         }
     }
@@ -115,18 +114,18 @@ void print_stats(struct bpf_object *obj) {
     int proto_fd = bpf_object__find_map_fd_by_name(obj, "proto_stats");
     if (proto_fd >= 0) {
         uint16_t p_key = 0, next_p_key; uint64_t val;
-        printf("   └─ [Protocol Distribution]:\n");
+        fprintf(stderr, "   └─ [Protocol Distribution]:\n");
         while (bpf_map_get_next_key(proto_fd, &p_key, &next_p_key) == 0) {
             bpf_map_lookup_elem(proto_fd, &next_p_key, &val);
-            printf("      - Proto 0x%04x: %lu packets\n", next_p_key, val);
+            fprintf(stderr, "      - Proto 0x%04x: %lu packets\n", next_p_key, val);
             p_key = next_p_key;
         }
     }
-    fflush(stdout);
+    fflush(stderr);
 }
 
 void export_all_flows() {
-    struct flow_record *f, *tmp; uint32_t exported = 0;
+    struct flow_record *f, *tmp;
     HASH_ITER(hh, flows, f, tmp) {
         double dur = (double)(f->last_time - f->start_time) / 1000.0;
         char s_s[64], d_s[64];
@@ -137,7 +136,6 @@ void export_all_flows() {
             inet_ntop(AF_INET6, f->key.src_ip, s_s, 64);
             inet_ntop(AF_INET6, f->key.dst_ip, d_s, 64);
         }
-        
         printf("%s,%s,%u,%u,%u,%u,%u,%u,%s,%lu,%.2f,%lu,%lu,%lu,%lu,", 
                s_s, d_s, (unsigned int)ntohs(f->key.src_port), (unsigned int)ntohs(f->key.dst_port), (unsigned int)f->key.protocol, 
                (unsigned int)f->ttl, (unsigned int)f->window_size, (unsigned int)f->is_tunneled, f->sni_hostname, f->start_time, dur,
@@ -158,8 +156,7 @@ void export_all_flows() {
                (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 4) & 1), (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 5) & 1), 
                (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 6) & 1), (unsigned int)(((f->fwd_flags | f->bwd_flags) >> 7) & 1), 
                f->dns_query_count, f->dns_ttl_stat.mean, welford_std(&f->dns_ttl_stat));
-        
-        HASH_DEL(flows, f); free(f); exported++;
+        HASH_DEL(flows, f); free(f);
     }
     fflush(stdout);
 }
@@ -243,7 +240,7 @@ int main(int argc, char **argv) {
     
     time_t last_print = time(NULL);
     while (!exiting) {
-        ring_buffer__poll(rb, 100);
+        ring_buffer__poll(rb, 10);
         if (time(NULL) - last_print >= 5) {
             print_stats(obj);
             last_print = time(NULL);
