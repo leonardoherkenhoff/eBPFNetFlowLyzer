@@ -29,12 +29,12 @@ Este documento consolida todos os requisitos técnicos, arquiteturais e científ
 ### 3. Arquitetura e Performance (Control Plane)
 | Requisito | Status | Evidência Técnica |
 | :--- | :---: | :--- |
-| **Shared-Nothing Parallel**| [x] | `loader.c:worker_t` (Isolamento por core Xeon) |
-| **NUMA-Aware Affinity** | [x] | `loader.c:worker_fn` (`pthread_setaffinity_np`) |
+| **Shared-Nothing Parallel**| [x] | `loader.c:worker_t` (Isolamento por core físico) |
+| **Dynamic Topology Scalability** | [x] | `loader.c:main` (`sysconf(_SC_NPROCESSORS_ONLN)`) |
+| **Agnostic Affinity** | [x] | `loader.c:worker_fn` (`pthread_setaffinity_np`) |
 | **I/O Particionado** | [x] | `loader.c:worker_fn` (`worker_telemetry/cpu_%d.csv`) |
 | **Paradigma de Fluxo** | [x] | `loader.c:flush_flow` (Exportação orientada a eventos) |
 | **Granularidade Micro** | [x] | `loader.c:handle_event` (`SEGMENT_THRESHOLD = 100`) |
-| **Gatilhos de Flush** | [x] | `loader.c:handle_event` (FIN/RST + Idle Timeout) |
 
 ---
 
@@ -48,7 +48,6 @@ Este documento consolida todos os requisitos técnicos, arquiteturais e científ
 ### Fase 3: Resposta Autônoma (MAPE-K)
 - [ ] **Inferência ML no Kernel**: Classificação via modelos quantizados em XDP.
 - [ ] **Mitigação em Fluxo**: Ações de drop/redirect baseadas em assinaturas estatísticas.
-- [ ] **Feedback Loop**: Ajuste dinâmico da profundidade de extração.
 
 ---
 **Lynceus: Extração Precisa, Integridade Absoluta.**
