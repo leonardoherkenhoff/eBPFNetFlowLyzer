@@ -2,11 +2,16 @@
 
 **High-Performance eBPF/XDP Feature Extraction Engine for Security Research and Infrastructure.**
 
+**Version**: `v2.0.4-dev (Scientific Totality)`
+
 ---
 
 ## 📌 Overview
 
 **Lynceus** is a professional-grade network telemetry engine designed for line-rate, flow-level feature extraction. Leveraging a **Massively Parallel Shared-Nothing Architecture** and eBPF/XDP, it provides a non-redundant matrix of **399 scientific features**, including advanced statistical moments and deep protocol dissection.
+
+> [!NOTE]
+> **Research Suite**: The end-to-end research experiment suite (automated build, extraction, labeling, and ML benchmarking) is exclusively available on the `develop` branch. This `master` branch contains the production-ready engine.
 
 The project is **hardware-agnostic**, performing dynamic host CPU topology detection (SMP/NUMA) to instantiate isolated workers and core-private RingBuffers eBPF for every available physical core.
 
@@ -43,7 +48,8 @@ Multithreaded C daemon with strict CPU pinning. Each worker processes its own ev
 
 ### Prerequisites
 - Linux Kernel 5.15+
-- `clang`, `llvm`, `libbpf-dev`
+- `libbpf 1.2+` (Required for modern RingBuffer APIs)
+- `clang`, `llvm`, `libelf-dev`, `zlib1g-dev`
 - `make`
 
 ### Compilation and Execution
