@@ -27,7 +27,7 @@
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define MAX_FLOWS 100000
-#define SEGMENT_THRESHOLD 10000 
+#define SEGMENT_THRESHOLD 1000 /* Increased granularity for research */
 
 struct flow_key {
     __u8 src_ip[16];
