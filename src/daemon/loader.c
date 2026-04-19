@@ -95,10 +95,11 @@ struct w_stat {
 static void w_init(struct w_stat *w) { memset(w, 0, sizeof(*w)); w->min = 0xFFFFFFFF; }
 
 /**
- * @brief Updates Welford moments with a new sample $x$.
  * @details Uses the update rules for central moments to ensure numerical precision.
- * $\Delta = x - M_1$
- * $M_1 = M_1 + \frac{\Delta}{n}$
+ * $\Delta = x - M_1, \quad M_1 = M_1 + \frac{\Delta}{n}$
+ * $M_4 = M_4 + term_1 \Delta_n^2 (n^2 - 3n + 3) + 6 \Delta_n^2 M_2 - 4 \Delta_n M_3$
+ * $M_3 = M_3 + term_1 \Delta_n (n - 2) - 3 \Delta_n M_2$
+ * $M_2 = M_2 + term_1$
  */
 static inline void w_update(struct w_stat *w, double x) {
     uint64_t n1 = w->n; w->n++;
@@ -224,6 +225,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     if (e->key.protocol == 6) w_update(&s->win_s, e->window_size);
     if (e->dns_answer_count > 0) { s->dns_a_count += e->dns_answer_count; s->dns_q_count++; }
     s->last_entropy = calculate_entropy(e->payload_hint, 64);
+    /* For ICMP: src_port contains Echo ID, icmp_id contains Type/Code */
     if (e->key.protocol == 1 || e->key.protocol == 58) s->icmp_id = (e->icmp_type << 8) | e->icmp_code;
     if (e->is_fwd) {
         if (s->f_last > 0) { 

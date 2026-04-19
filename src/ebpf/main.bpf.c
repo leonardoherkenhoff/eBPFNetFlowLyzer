@@ -160,10 +160,10 @@ int xdp_prog(struct xdp_md *ctx) {
     if (l4_p == 6) { /* TCP RFC 793 */
         struct tcphdr *tcp = l4_h; if ((void *)(tcp + 1) <= data_end) {
             sport = tcp->source; dport = tcp->dest;
-            flags = (tcp->fin) | (tcp->syn << 1) | (tcp->rst << 2) | (tcp->psh << 3) | (tcp->ack << 4) | (tcp->urg << 5);
+            flags = (tcp->fin) | (tcp->syn << 1) | (tcp->rst << 2) | (tcp->psh << 3) | (tcp->ack << 4) | (tcp->urg << 5) | (tcp->ece << 6) | (tcp->cwr << 7);
             h_len += tcp->doff * 4; win = bpf_ntohs(tcp->window);
         }
-    } else if (l4_p == 17) { /* UDP RFC 768 */
+    } else if (l4_p == 17 || l4_p == 132) { /* UDP RFC 768 / SCTP RFC 4960 */
         struct udphdr *udp = l4_h; if ((void *)(udp + 1) <= data_end) {
             sport = udp->source; dport = udp->dest; h_len += 8;
             /* Recursive VXLAN Decapsulation (RFC 7348) */
@@ -227,7 +227,8 @@ int xdp_prog(struct xdp_md *ctx) {
         ev->payload_len = (data_end - data) - h_len - sizeof(struct ethhdr);
         ev->header_len = h_len; ev->window_size = win; ev->tcp_flags = flags;
         ev->ttl = ttl; ev->is_fwd = is_fwd; ev->timestamp_ns = bpf_ktime_get_ns();
-        ev->icmp_type = (uint8_t)(sport & 0xFF); ev->icmp_code = (uint8_t)(dport & 0xFF);
+        ev->icmp_type = (uint8_t)(ver == 4 ? (sport & 0xFF) : (sport & 0xFF)); 
+        ev->icmp_code = (uint8_t)(dport & 0xFF);
         ev->dns_answer_count = dns_ans;
         void *payload = data + h_len + sizeof(struct ethhdr);
         if (payload + PAYLOAD_HINT_SIZE <= data_end) __builtin_memcpy(ev->payload_hint, payload, PAYLOAD_HINT_SIZE);
