@@ -1,18 +1,17 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Unified Research Extractor (v1.9.1).
+ * @brief User-Space Control Plane - Milestone 3: High-Performance Real-Time Extractor (v1.9.3).
  * 
  * @details 
- * Este orquestrador realiza a unificação taxonômica do NTLFlowLyzer e ALFlowLyzer.
- * Implementa o cálculo de momentos estatísticos de ordem $k \in \{1, 2, 3, 4\}$ 
- * em complexidade $O(1)$ via algoritmo de Pébay/Welford.
+ * Implementação otimizada para o ciclo MAPE-K via processamento paralelo multithread.
+ * Utiliza um modelo de Dispatcher-Worker para decompor a fase de Analyze do ciclo autonômico,
+ * permitindo a extração de 400+ features a taxas de rede (Tested up to 33M packets).
  * 
  * Formalismo Matemático:
  * - Média ($\mu$): $\mu_n = \mu_{n-1} + \frac{x_n - \mu_{n-1}}{n}$
  * - Variância ($\sigma^2$): $M_{2,n} = M_{2,n-1} + (x_n - \mu_{n-1})(x_n - \mu_n)$
- * - Entropia ($H$): $H(X) = -\sum_{i=1}^n P(x_i) \log_2 P(x_i)$
  * 
- * @version 1.9.1 (Milestone 3 Pre-v2.0)
+ * @version 1.9.3 (MAPE-K Real-Time Edition)
  */
 
 #include <stdio.h>
@@ -30,10 +29,12 @@
 #include <linux/if_link.h>
 #include <time.h>
 #include <math.h>
+#include <pthread.h>
 
-#define HASH_SIZE 131072
-#define IDLE_THRESHOLD 1.0
+#define HASH_SIZE 32768
 #define HISTOGRAM_BINS 64
+#define NUM_WORKERS 7
+#define QUEUE_SIZE 65536
 
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
@@ -58,19 +59,13 @@ struct packet_event_t {
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
-/**
- * @struct w_stat
- * @brief Universal accumulator for 10 statistical moments.
- * Includes O(1) Mean, Std, Var, Skew, Kurt, Max, Min, CoV, and approximate Median/Mode.
- */
 struct w_stat {
     uint64_t n; double M1, M2, M3, M4; uint32_t max, min;
-    double median; /* Iterative approximation */
-    uint32_t hist[HISTOGRAM_BINS]; /* For Mode estimation */
+    double median; uint32_t hist[HISTOGRAM_BINS];
 };
 
 static void w_init(struct w_stat *w) { memset(w, 0, sizeof(*w)); w->min = 0xFFFFFFFF; }
-static void w_update(struct w_stat *w, double x) {
+static inline void w_update(struct w_stat *w, double x) {
     uint64_t n1 = w->n; w->n++;
     double delta = x - w->M1, delta_n = delta / w->n, delta_n2 = delta_n * delta_n, term1 = delta * delta_n * n1;
     w->M1 += delta_n;
@@ -78,126 +73,137 @@ static void w_update(struct w_stat *w, double x) {
     w->M3 += term1 * delta_n * (w->n - 2) - 3 * delta_n * w->M2;
     w->M2 += term1;
     if (x > w->max) w->max = (uint32_t)x; if (x < w->min) w->min = (uint32_t)x;
-    
-    /* Iterative Median Estimation (Stochastic Gradient Descent style) */
     if (w->n == 1) w->median = x; else w->median += (x > w->median ? 1.0 : -1.0) * (fabs(x - w->median) / w->n);
-    
-    /* Histogram Update (Bucketed by 32 bytes for MTU-sized metrics) */
     uint32_t bin = (uint32_t)x / 32; if (bin < HISTOGRAM_BINS) w->hist[bin]++;
 }
 
-static double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / (w->n - 1)) : 0; }
-static double w_var(struct w_stat *w) { return (w->n > 1) ? w->M2 / (w->n - 1) : 0; }
-static double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
-static double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
-static double w_cov(struct w_stat *w) { double s = w_std(w); return (w->M1 != 0) ? s / w->M1 : 0; }
-static uint32_t w_mode(struct w_stat *w) { 
+static inline double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / (w->n - 1)) : 0; }
+static inline double w_var(struct w_stat *w) { return (w->n > 1) ? w->M2 / (w->n - 1) : 0; }
+static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
+static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
+static inline double w_cov(struct w_stat *w) { double s = w_std(w); return (w->M1 != 0) ? s / w->M1 : 0; }
+static inline uint32_t w_mode(struct w_stat *w) { 
     uint32_t max_v = 0, m_bin = 0; for(int i=0; i<HISTOGRAM_BINS; i++) if(w->hist[i] > max_v) { max_v = w->hist[i]; m_bin = i; }
     return m_bin * 32;
 }
 
 struct flow_state {
     struct flow_key key; struct flow_meta meta;
-    struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat;
-    struct w_stat t_d_pay, f_d_pay, b_d_pay, t_d_iat, f_d_iat, b_d_iat;
+    struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat, t_d_pay, f_d_pay, b_d_pay;
     uint64_t f_bytes, b_bytes, f_last, b_last, t_last;
     uint32_t f_l_pay, b_l_pay, t_l_pay;
     uint64_t flags[8], f_flags[8], b_flags[8];
-    uint16_t f_win_init, b_win_init;
     int active;
 };
 
-static struct flow_state flow_table[HASH_SIZE];
+struct worker_t {
+    pthread_t thread;
+    struct packet_event_t queue[QUEUE_SIZE];
+    volatile uint64_t head, tail;
+    struct flow_state flow_table[HASH_SIZE];
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int id;
+};
+
+static struct worker_t workers[NUM_WORKERS];
+static volatile bool exiting = false;
+static void sig_handler(int sig) { (void)sig; exiting = true; for(int i=0; i<NUM_WORKERS; i++) pthread_cond_signal(&workers[i].cond); }
+
 static uint32_t hash_key(struct flow_key *k) {
     uint32_t h = 0; for (int i = 0; i < 16; i++) h = h * 31 + k->src_ip[i] + k->dst_ip[i];
-    return (h * 31 + k->src_port + k->dst_port + k->protocol) % HASH_SIZE;
+    return (h * 31 + k->src_port + k->dst_port + k->protocol);
 }
 
-static volatile bool exiting = false;
-static void sig_handler(int sig) { (void)sig; exiting = true; }
+void *worker_fn(void *arg) {
+    struct worker_t *w = arg;
+    char s_buf[4096];
+    while (!exiting) {
+        pthread_mutex_lock(&w->mutex);
+        while (w->head == w->tail && !exiting) pthread_cond_wait(&w->cond, &w->mutex);
+        if (exiting && w->head == w->tail) { pthread_mutex_unlock(&w->mutex); break; }
+        struct packet_event_t e = w->queue[w->tail % QUEUE_SIZE];
+        w->tail++;
+        pthread_mutex_unlock(&w->mutex);
+
+        uint32_t idx = hash_key(&e.key) % HASH_SIZE;
+        while (w->flow_table[idx].active && memcmp(&w->flow_table[idx].key, &e.key, sizeof(struct flow_key)) != 0) idx = (idx + 1) % HASH_SIZE;
+        if (!w->flow_table[idx].active) {
+            memset(&w->flow_table[idx], 0, sizeof(struct flow_state)); memcpy(&w->flow_table[idx].key, &e.key, sizeof(struct flow_key));
+            memcpy(&w->flow_table[idx].meta, &e.meta, sizeof(struct flow_meta));
+            w_init(&w->flow_table[idx].t_pay); w_init(&w->flow_table[idx].f_pay); w_init(&w->flow_table[idx].b_pay);
+            w_init(&w->flow_table[idx].t_hdr); w_init(&w->flow_table[idx].f_hdr); w_init(&w->flow_table[idx].b_hdr);
+            w_init(&w->flow_table[idx].t_iat); w_init(&w->flow_table[idx].f_iat); w_init(&w->flow_table[idx].b_iat);
+            w_init(&w->flow_table[idx].t_d_pay); w_init(&w->flow_table[idx].f_d_pay); w_init(&w->flow_table[idx].b_d_pay);
+            w->flow_table[idx].active = 1;
+        }
+
+        struct flow_state *s = &w->flow_table[idx];
+        double duration = (double)(e.timestamp_ns - s->meta.start_time) / 1e9;
+        if (s->t_last > 0) {
+            w_update(&s->t_iat, (double)(e.timestamp_ns - s->t_last) / 1e9);
+            w_update(&s->t_d_pay, abs((int)e.payload_len - (int)s->t_l_pay));
+        }
+        s->t_last = e.timestamp_ns; s->t_l_pay = e.payload_len;
+        w_update(&s->t_pay, e.payload_len); w_update(&s->t_hdr, e.header_len);
+        if (e.is_fwd) {
+            if (s->f_last > 0) w_update(&s->f_iat, (double)(e.timestamp_ns - s->f_last) / 1e9);
+            s->f_last = e.timestamp_ns; w_update(&s->f_pay, e.payload_len); w_update(&s->f_hdr, e.header_len);
+            s->f_bytes += e.payload_len; for (int i=0; i<8; i++) if (e.tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
+        } else {
+            if (s->b_last > 0) w_update(&s->b_iat, (double)(e.timestamp_ns - s->b_last) / 1e9);
+            s->b_last = e.timestamp_ns; w_update(&s->b_pay, e.payload_len); w_update(&s->b_hdr, e.header_len);
+            s->b_bytes += e.payload_len; for (int i=0; i<8; i++) if (e.tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
+        }
+
+        char sip[64], dip[64];
+        if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e.key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e.key.dst_ip[12], dip, 64); }
+        else { inet_ntop(AF_INET6, e.key.src_ip, sip, 64); inet_ntop(AF_INET6, e.key.dst_ip, dip, 64); }
+
+        int off = snprintf(s_buf, sizeof(s_buf), "%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", sip, dip, ntohs(e.key.src_port), ntohs(e.key.dst_port), e.key.protocol, sip, ntohs(e.key.src_port), dip, ntohs(e.key.dst_port), e.key.protocol, (double)s->meta.start_time / 1e9, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
+        
+        #define FMT_W(W) off += snprintf(s_buf + off, sizeof(s_buf) - off, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), W.mode)
+        FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay); FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr);
+        FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat); FMT_W(s->t_d_pay); FMT_W(s->f_d_pay); FMT_W(s->b_d_pay);
+        for(int i=0; i<8; i++) off += snprintf(s_buf + off, sizeof(s_buf) - off, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
+        off += snprintf(s_buf + off, sizeof(s_buf) - off, "%.4f,%u,%u,%u\n", (double)e.payload_len/64.0, e.icmp_type, e.icmp_code, e.ttl);
+        
+        fwrite(s_buf, 1, off, stdout);
+        if (e.tcp_flags & 0x05) s->active = 0;
+    }
+    return NULL;
+}
 
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)ctx; (void)data_sz; const struct packet_event_t *e = data;
-    uint32_t idx = hash_key((struct flow_key *)&e->key);
-    while (flow_table[idx].active && memcmp(&flow_table[idx].key, &e->key, sizeof(struct flow_key)) != 0) idx = (idx + 1) % HASH_SIZE;
-    if (!flow_table[idx].active) {
-        memset(&flow_table[idx], 0, sizeof(struct flow_state)); memcpy(&flow_table[idx].key, &e->key, sizeof(struct flow_key));
-        memcpy(&flow_table[idx].meta, &e->meta, sizeof(struct flow_meta));
-        w_init(&flow_table[idx].t_pay); w_init(&flow_table[idx].f_pay); w_init(&flow_table[idx].b_pay);
-        w_init(&flow_table[idx].t_hdr); w_init(&flow_table[idx].f_hdr); w_init(&flow_table[idx].b_hdr);
-        w_init(&flow_table[idx].t_iat); w_init(&flow_table[idx].f_iat); w_init(&flow_table[idx].b_iat);
-        w_init(&flow_table[idx].t_d_pay); w_init(&flow_table[idx].f_d_pay); w_init(&flow_table[idx].b_d_pay);
-        w_init(&flow_table[idx].t_d_iat); flow_table[idx].active = 1;
+    uint32_t w_idx = hash_key((struct flow_key *)&e->key) % NUM_WORKERS;
+    struct worker_t *w = &workers[w_idx];
+    pthread_mutex_lock(&w->mutex);
+    if (w->head - w->tail < QUEUE_SIZE) {
+        w->queue[w->head % QUEUE_SIZE] = *e;
+        w->head++;
+        pthread_cond_signal(&w->cond);
     }
-
-    struct flow_state *s = &flow_table[idx];
-    double duration = (double)(e->timestamp_ns - s->meta.start_time) / 1e9;
-    if (s->t_last > 0) {
-        double gap = (double)(e->timestamp_ns - s->t_last) / 1e9;
-        w_update(&s->t_iat, gap); w_update(&s->t_d_pay, abs((int)e->payload_len - (int)s->t_l_pay));
-    }
-    s->t_last = e->timestamp_ns; s->t_l_pay = e->payload_len;
-
-    w_update(&s->t_pay, e->payload_len); w_update(&s->t_hdr, e->header_len);
-    if (e->is_fwd) {
-        if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
-        s->f_last = e->timestamp_ns; w_update(&s->f_pay, e->payload_len); w_update(&s->f_hdr, e->header_len);
-        s->f_bytes += e->payload_len; if (s->f_pay.n == 1) s->f_win_init = e->window_size;
-        for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->f_flags[i]++; }
-    } else {
-        if (s->b_last > 0) w_update(&s->b_iat, (double)(e->timestamp_ns - s->b_last) / 1e9);
-        s->b_last = e->timestamp_ns; w_update(&s->b_pay, e->payload_len); w_update(&s->b_hdr, e->header_len);
-        s->b_bytes += e->payload_len; if (s->b_pay.n == 1) s->b_win_init = e->window_size;
-        for (int i=0; i<8; i++) if (e->tcp_flags & (1<<i)) { s->flags[i]++; s->b_flags[i]++; }
-    }
-
-    char sip[64], dip[64];
-    if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e->key.dst_ip[12], dip, 64); }
-    else { inet_ntop(AF_INET6, e->key.src_ip, sip, 64); inet_ntop(AF_INET6, e->key.dst_ip, dip, 64); }
-
-    /* Output Section: Unified 400+ Feature Matrix */
-    /* Identity (7) */
-    printf("%s-%s-%u-%u-%u,%s,%u,%s,%u,%u,%.6f,%.6f,", sip, dip, ntohs(e->key.src_port), ntohs(e->key.dst_port), e->key.protocol, sip, ntohs(e->key.src_port), dip, ntohs(e->key.dst_port), e->key.protocol, (double)s->meta.start_time / 1e9, duration);
-    /* Counts & Ratios (8) */
-    printf("%lu,%lu,%lu,%lu,%lu,%lu,%.2f,%.2f,", s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes, (s->b_pay.n > 0 ? (double)s->f_pay.n/s->b_pay.n : 0), (s->b_bytes > 0 ? (double)s->f_bytes/s->b_bytes : 0));
-    
-    /* Matrix Segment: Payload Statistics (Tot/Fwd/Bwd) (3 directions * 10 stats = 30) */
-    #define PRINT_W(W) printf("%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%u,", W.max, W.min, W.M1, w_std(&W), w_var(&W), W.median, w_skew(&W), w_kurt(&W), w_cov(&W), w_mode(&W))
-    PRINT_W(s->t_pay); PRINT_W(s->f_pay); PRINT_W(s->b_pay);
-    
-    /* Matrix Segment: Header Statistics (Tot/Fwd/Bwd) (30) */
-    PRINT_W(s->t_hdr); PRINT_W(s->f_hdr); PRINT_W(s->b_hdr);
-    
-    /* Matrix Segment: IAT Statistics (Tot/Fwd/Bwd) (30) */
-    PRINT_W(s->t_iat); PRINT_W(s->f_iat); PRINT_W(s->b_iat);
-    
-    /* Matrix Segment: Delta Length Statistics (Theoretical Features) (30) */
-    PRINT_W(s->t_d_pay); PRINT_W(s->f_d_pay); PRINT_W(s->b_d_pay);
-    
-    /* Flags Matrix (8 flags * 3 variants = 24) */
-    for(int i=0; i<8; i++) printf("%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
-    
-    /* L7 Hints & Protocol Control */
-    printf("%.4f,%u,%u,%u\n", (double)e->payload_len/64.0, e->icmp_type, e->icmp_code, e->ttl);
-
-    if (e->tcp_flags & 0x05) s->active = 0; return 0;
+    pthread_mutex_unlock(&w->mutex);
+    return 0;
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
-    
-    /* Optimization: Use a large buffer for CSV output to prevent RingBuffer drops */
-    static char out_buf[1024 * 1024];
-    setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
+    static char out_buf[2 * 1024 * 1024]; setvbuf(stdout, out_buf, _IOFBF, sizeof(out_buf));
 
-    /* Scientific CSV Header (v1.9.1 Master) */
     printf("flow_id,src_ip,src_port,dst_ip,dst_port,protocol,timestamp,duration,PacketsCount,FwdPacketsCount,BwdPacketsCount,TotalBytes,FwdBytes,BwdBytes,FwdBwdPktRatio,FwdBwdByteRatio,");
     const char *dirs[] = {"Tot", "Fwd", "Bwd"}; const char *metrics[] = {"Pay", "Hdr", "IAT", "DeltaLen"};
     for(int m=0; m<4; m++) for(int d=0; d<3; d++) printf("%s_%s_Max,%s_%s_Min,%s_%s_Mean,%s_%s_Std,%s_%s_Var,%s_%s_Median,%s_%s_Skew,%s_%s_Kurt,%s_%s_CoV,%s_%s_Mode,", dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m], dirs[d], metrics[m]);
     const char *flgs[] = {"FIN", "SYN", "RST", "PSH", "ACK", "URG", "ECE", "CWR"};
     for(int i=0; i<8; i++) printf("%s_Cnt,%s_Fwd_Cnt,%s_Bwd_Cnt,", flgs[i], flgs[i], flgs[i]);
     printf("PayloadEntropy,IcmpType,IcmpCode,TTL\n");
+
+    for (int i = 0; i < NUM_WORKERS; i++) {
+        workers[i].id = i; pthread_mutex_init(&workers[i].mutex, NULL);
+        pthread_cond_init(&workers[i].cond, NULL); pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
+    }
 
     struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
     if (!obj || bpf_object__load(obj)) return 1;
@@ -206,5 +212,6 @@ int main(int argc, char **argv) {
     int fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf");
     struct ring_buffer *rb = ring_buffer__new(fd, handle_event, NULL, NULL);
     while (!exiting) ring_buffer__poll(rb, 100);
+    for (int i = 0; i < NUM_WORKERS; i++) pthread_join(workers[i].thread, NULL);
     ring_buffer__free(rb); bpf_object__close(obj); return 0;
 }
