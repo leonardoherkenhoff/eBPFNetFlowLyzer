@@ -1,12 +1,11 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - Universal Protocol Extractor (v3.0.0).
+ * @brief eBPF Data Plane - Deep Feature Extractor (v4.0.0).
  * 
  * @details 
- * Implements full L3/L4/L7 dissection for TCP, UDP, ICMP, and DNS.
- * Reaches the "Research-Grade" goal for multi-protocol feature extraction.
+ * Exports raw payload hints for L7 analysis (DNS) and full L3/L4 telemetry.
  * 
- * @version 3.0.0
+ * @version 4.0.0
  */
 
 #include "vmlinux.h"
@@ -17,6 +16,7 @@
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define MAX_FLOWS 100000
+#define PAYLOAD_HINT_SIZE 64
 
 struct flow_key {
     __u8 src_ip[16]; __u8 dst_ip[16];
@@ -37,10 +37,8 @@ struct packet_event_t {
     __u16 window_size; __u8 tcp_flags;
     __u8 ttl; __u8 is_fwd;
     __u64 timestamp_ns;
-    /* ICMP Fields */
     __u8 icmp_type; __u8 icmp_code;
-    /* DNS Fields (Hints) */
-    __u16 dns_query_type; __u16 dns_answer_count;
+    __u8 payload_hint[PAYLOAD_HINT_SIZE];
 } __attribute__((packed));
 
 struct {
@@ -52,7 +50,7 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 128 * 1024 * 1024);
+    __uint(max_entries, 256 * 1024 * 1024); /* Increased for N=1 streaming */
 } pkt_ringbuf SEC(".maps");
 
 SEC("xdp")
@@ -65,7 +63,6 @@ int xdp_prog(struct xdp_md *ctx) {
     __u16 eth_proto = bpf_ntohs(eth->h_proto);
     void *l3_hdr = (void *)(eth + 1);
 
-    /* VLAN Traversal */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == 0x8100 || eth_proto == 0x88A8) {
@@ -76,21 +73,17 @@ int xdp_prog(struct xdp_md *ctx) {
     }
 
     struct flow_key key = {0};
-    __u8 ip_ver = 0, l4_proto = 0, ttl = 0;
+    __u8 ip_ver = 0, l4_proto = 0, ttl = 0, tcp_flags = 0;
     __u16 header_len = 0, window = 0;
-    __u8 tcp_flags = 0, icmp_type = 0, icmp_code = 0;
-    __u16 dns_q_type = 0, dns_ans_cnt = 0;
     void *l4_hdr = NULL;
 
     if (eth_proto == ETH_P_IP) {
-        struct iphdr *ip = l3_hdr;
-        if ((void *)(ip + 1) > data_end) return XDP_PASS;
+        struct iphdr *ip = l3_hdr; if ((void *)(ip + 1) > data_end) return XDP_PASS;
         ip_ver = 4; l4_proto = ip->protocol;
         *(__u32 *)&key.src_ip[12] = ip->saddr; *(__u32 *)&key.dst_ip[12] = ip->daddr;
         l4_hdr = l3_hdr + (ip->ihl * 4); header_len = ip->ihl * 4; ttl = ip->ttl;
     } else if (eth_proto == ETH_P_IPV6) {
-        struct ipv6hdr *ip6 = l3_hdr;
-        if ((void *)(ip6 + 1) > data_end) return XDP_PASS;
+        struct ipv6hdr *ip6 = l3_hdr; if ((void *)(ip6 + 1) > data_end) return XDP_PASS;
         ip_ver = 6; l4_proto = ip6->nexthdr;
         __builtin_memcpy(key.src_ip, &ip6->saddr, 16); __builtin_memcpy(key.dst_ip, &ip6->daddr, 16);
         l4_hdr = l3_hdr + 40; header_len = 40; ttl = ip6->hop_limit;
@@ -98,39 +91,18 @@ int xdp_prog(struct xdp_md *ctx) {
 
     key.protocol = l4_proto;
 
-    /* L4 & L7 Dissection */
     if (l4_proto == 6) { /* TCP */
-        struct tcphdr *tcp = l4_hdr;
-        if ((void *)(tcp + 1) <= data_end) {
+        struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) <= data_end) {
             key.src_port = tcp->source; key.dst_port = tcp->dest;
             tcp_flags = (tcp->fin) | (tcp->syn << 1) | (tcp->rst << 2) | (tcp->psh << 3) | (tcp->ack << 4) | (tcp->urg << 5);
             header_len += tcp->doff * 4; window = bpf_ntohs(tcp->window);
         }
     } else if (l4_proto == 17) { /* UDP */
-        struct udphdr *udp = l4_hdr;
-        if ((void *)(udp + 1) <= data_end) {
-            key.src_port = udp->source; key.dst_port = udp->dest;
-            header_len += 8;
-            /* Basic DNS Dissection (Port 53) */
-            if (bpf_ntohs(udp->source) == 53 || bpf_ntohs(udp->dest) == 53) {
-                struct { __u16 id; __u16 flags; __u16 qd; __u16 an; __u16 ns; __u16 ar; } *dns = (void *)(udp + 1);
-                if ((void *)(dns + 1) <= data_end) {
-                    dns_ans_cnt = bpf_ntohs(dns->an);
-                    void *q = (void *)(dns + 1);
-                    /* Minimalist DNS Query Type Extraction (skipping labels) */
-                    if (q + 16 < data_end) dns_q_type = 1; // Hint: It's a DNS payload
-                }
-            }
-        }
-    } else if (l4_proto == 1 || l4_proto == 58) { /* ICMPv4/v6 */
-        struct { __u8 type; __u8 code; __u16 cksum; } *icmp = l4_hdr;
-        if ((void *)(icmp + 1) <= data_end) {
-            icmp_type = icmp->type; icmp_code = icmp->code;
-            header_len += 4;
+        struct udphdr *udp = l4_hdr; if ((void *)(udp + 1) <= data_end) {
+            key.src_port = udp->source; key.dst_port = udp->dest; header_len += 8;
         }
     }
-    
-    /* Bidirectional Identification */
+
     struct flow_meta *meta = bpf_map_lookup_elem(&flow_registry, &key);
     __u8 is_fwd = 1;
     if (!meta) {
@@ -148,16 +120,14 @@ int xdp_prog(struct xdp_md *ctx) {
         meta = bpf_map_lookup_elem(&flow_registry, &key);
     }
 
-    /* Export Universal Packet Event */
     struct packet_event_t *ev = bpf_ringbuf_reserve(&pkt_ringbuf, sizeof(*ev), 0);
     if (ev) {
-        __builtin_memcpy(&ev->key, &key, sizeof(key));
-        if (meta) __builtin_memcpy(&ev->meta, meta, sizeof(*meta));
+        __builtin_memcpy(&ev->key, &key, sizeof(key)); if (meta) __builtin_memcpy(&ev->meta, meta, sizeof(*meta));
         ev->payload_len = (data_end - data) - header_len; ev->header_len = header_len;
         ev->window_size = window; ev->tcp_flags = tcp_flags; ev->ttl = ttl;
         ev->is_fwd = is_fwd; ev->timestamp_ns = bpf_ktime_get_ns();
-        ev->icmp_type = icmp_type; ev->icmp_code = icmp_code;
-        ev->dns_query_type = dns_q_type; ev->dns_answer_count = dns_ans_cnt;
+        void *payload = data + header_len + sizeof(struct ethhdr);
+        if (payload + PAYLOAD_HINT_SIZE <= data_end) __builtin_memcpy(ev->payload_hint, payload, PAYLOAD_HINT_SIZE);
         bpf_ringbuf_submit(ev, 0);
     }
 
