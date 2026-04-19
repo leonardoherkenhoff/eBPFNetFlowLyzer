@@ -5,20 +5,10 @@
  * @details 
  * Implements a research-grade packet interception pipeline in kernel-space 
  * using eBPF/XDP. Designed for absolute protocol visibility and high-throughput 
- * telemetry generation.
- * 
- * Capabilities:
- * 1. **Universal Dual-Stack**: Native support for IPv4 and IPv6.
- * 2. **Multi-Protocol Dissection**: TCP (Flags/Win), UDP, ICMP/v6 (Type/Code/ID).
- * 3. **Tunneling & Encapsulation**: 
- *    - Recursive decapsulation for GRE and VXLAN.
- *    - Iterative VLAN QinQ (802.1Q/ad) traversal.
- * 4. **L7 Metadata Hints**: 
- *    - DNS Answer Counts (RFC 1035).
- *    - Shannon Entropy capture for first-64 bytes.
+ * telemetry generation. Utilizes iterative VLAN traversal and recursive tunnel 
+ * decapsulation to ensure zero-blind-spot monitoring.
  * 
  * @author Leonardo Herkenhoff (Senior Research Partner)
- * @version 2.4-Standard
  */
 
 #include "vmlinux.h"
@@ -26,7 +16,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
-/** @brief Protocol Constants */
+/** @brief Protocol Constants and Limits */
 #define ETH_P_IP 0x0800
 #define ETH_P_IPV6 0x86DD
 #define IPPROTO_GRE 47
@@ -34,40 +24,52 @@
 #define PAYLOAD_HINT_SIZE 64
 
 /**
- * @brief Flow Identification Key.
+ * @brief 5-Tuple Flow Identification Key.
+ * @details Uniquely identifies a bidirectional session across the network fabric.
  */
 struct flow_key {
-    uint8_t src_ip[16]; uint8_t dst_ip[16];
-    uint16_t src_port; uint16_t dst_port;
-    uint8_t protocol;
+    uint8_t src_ip[16]; /**< Source IP address (128-bit mapped) */
+    uint8_t dst_ip[16]; /**< Destination IP address (128-bit mapped) */
+    uint16_t src_port;  /**< Source L4 port or ICMP Echo ID */
+    uint16_t dst_port;  /**< Destination L4 port or ICMP Code */
+    uint8_t protocol;   /**< L4 Protocol identifier (IANA) */
 } __attribute__((packed));
 
 /**
  * @brief Immutable Flow Metadata.
+ * @details Captured during the first packet seen in a new flow session.
  */
 struct flow_meta {
-    uint64_t start_time;
-    uint8_t ip_ver; uint16_t eth_proto;
-    uint8_t src_mac[6]; uint8_t dst_mac[6];
+    uint64_t start_time;    /**< Inception timestamp in nanoseconds */
+    uint8_t ip_ver;         /**< IP Version (4 or 6) */
+    uint16_t eth_proto;     /**< Outer EtherType (including QinQ/VLAN) */
+    uint8_t src_mac[6];     /**< Source Layer-2 address */
+    uint8_t dst_mac[6];     /**< Destination Layer-2 address */
 } __attribute__((packed));
 
 /**
  * @brief Telemetry Event Record.
+ * @details Binary structure pushed to user-space via core-private RingBuffers.
  */
 struct packet_event_t {
-    struct flow_key key;
-    struct flow_meta meta;
-    uint32_t payload_len; uint16_t header_len;
-    uint16_t window_size; uint8_t tcp_flags;
-    uint8_t ttl; uint8_t is_fwd;
-    uint64_t timestamp_ns;
-    uint8_t icmp_type; uint8_t icmp_code;
-    uint16_t dns_answer_count;
-    uint8_t payload_hint[PAYLOAD_HINT_SIZE];
+    struct flow_key key;    /**< Flow identification 5-tuple */
+    struct flow_meta meta;  /**< Historical flow context */
+    uint32_t payload_len;   /**< L4 payload length (excluding headers) */
+    uint16_t header_len;    /**< Total protocol overhead (L2+L3+L4) */
+    uint16_t window_size;   /**< TCP Receive Window value */
+    uint8_t tcp_flags;      /**< Accumulated TCP control bits */
+    uint8_t ttl;            /**< Time-to-Live or Hop Limit */
+    uint8_t is_fwd;         /**< Directionality bit (1=Source->Dest) */
+    uint64_t timestamp_ns;  /**< High-precision capture timestamp */
+    uint8_t icmp_type;      /**< ICMP message type */
+    uint8_t icmp_code;      /**< ICMP message code */
+    uint16_t dns_answer_count; /**< RFC 1035 Answer count hint */
+    uint8_t payload_hint[PAYLOAD_HINT_SIZE]; /**< Initial 64 bytes of payload for entropy analysis */
 } __attribute__((packed));
 
 /** 
- * @brief BPF Maps for State and Communication.
+ * @brief Global Flow Registry.
+ * @details Maintains historical state for active sessions to ensure directionality tracking.
  */
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -76,6 +78,10 @@ struct {
     __type(value, struct flow_meta);
 } flow_registry SEC(".maps");
 
+/**
+ * @brief Core-Private RingBuffer Map.
+ * @details Array of file descriptors used to route telemetry to core-pinned workers.
+ */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
@@ -85,17 +91,8 @@ struct {
 
 /**
  * @brief Recursive L3 Parser for Nested Protocols.
- * @param data Data pointer.
- * @param data_end End of data pointer.
- * @param proto EtherType or Inner Protocol.
- * @param src Destination for source IP.
- * @param dst Destination for destination IP.
- * @param ver Destination for IP version.
- * @param l4_p Destination for L4 protocol.
- * @param l4_h Destination for L4 header pointer.
- * @param h_len Destination for header length.
- * @param ttl Destination for TTL/Hop Limit.
- * @return 0 on success, -1 on failure.
+ * @details Decodes standard and encapsulated IP headers with MTU boundary checks.
+ * @return 0 on successful dissection, -1 on bounds violation or unknown protocol.
  */
 static __always_inline int parse_l3(void *data, void *data_end, uint16_t proto, 
                                    uint8_t *src, uint8_t *dst, uint8_t *ver, uint8_t *l4_p, void **l4_h, uint16_t *h_len, uint8_t *ttl) {
@@ -118,7 +115,8 @@ static __always_inline int parse_l3(void *data, void *data_end, uint16_t proto,
 
 /**
  * @brief Main XDP Ingress Program.
- * @details Implements iterative VLAN traversal and recursive tunnel decapsulation.
+ * @details Executes iterative QinQ traversal, recursive tunnel decapsulation (GRE/VXLAN), 
+ * and L4 state extraction. Telemetry is flushed to user-space workers via core-pinned RingBuffers.
  */
 SEC("xdp")
 int xdp_prog(struct xdp_md *ctx) {
@@ -130,7 +128,7 @@ int xdp_prog(struct xdp_md *ctx) {
     uint16_t eth_proto = eth->h_proto;
     void *l3_hdr = (void *)(eth + 1);
 
-    /* 1. VLAN QinQ Traversal (Iterative) */
+    /* Iterative VLAN QinQ Traversal (802.1Q/802.1ad) */
     #pragma unroll
     for (int i = 0; i < 2; i++) {
         if (eth_proto == bpf_htons(0x8100) || eth_proto == bpf_htons(0x88A8)) {
@@ -147,7 +145,7 @@ int xdp_prog(struct xdp_md *ctx) {
 
     if (parse_l3(l3_hdr, data_end, eth_proto, src, dst, &ver, &l4_p, &l4_h, &h_len, &ttl) != 0) return XDP_PASS;
 
-    /* 2. Tunnel Decapsulation (GRE) */
+    /* Recursive Tunnel Decapsulation (RFC 2784 - GRE) */
     if (l4_p == IPPROTO_GRE) {
         struct { uint16_t flags; uint16_t proto; } *gre = l4_h;
         if ((void *)(gre + 1) > data_end) return XDP_PASS;
@@ -158,17 +156,17 @@ int xdp_prog(struct xdp_md *ctx) {
     uint16_t sport = 0, dport = 0, win = 0, dns_ans = 0;
     uint8_t flags = 0;
 
-    /* 3. L4 Dissection & ICMP Granularity */
-    if (l4_p == 6) { /* TCP */
+    /* Protocol Dissection & Flow State Extraction */
+    if (l4_p == 6) { /* TCP RFC 793 */
         struct tcphdr *tcp = l4_h; if ((void *)(tcp + 1) <= data_end) {
             sport = tcp->source; dport = tcp->dest;
             flags = (tcp->fin) | (tcp->syn << 1) | (tcp->rst << 2) | (tcp->psh << 3) | (tcp->ack << 4) | (tcp->urg << 5);
             h_len += tcp->doff * 4; win = bpf_ntohs(tcp->window);
         }
-    } else if (l4_p == 17) { /* UDP */
+    } else if (l4_p == 17) { /* UDP RFC 768 */
         struct udphdr *udp = l4_h; if ((void *)(udp + 1) <= data_end) {
             sport = udp->source; dport = udp->dest; h_len += 8;
-            /* VXLAN Decapsulation (Recursive) */
+            /* Recursive VXLAN Decapsulation (RFC 7348) */
             if (dport == bpf_htons(VXLAN_PORT)) {
                 struct { uint32_t f; uint32_t v; } *vx = (void *)(udp + 1);
                 if ((void *)(vx + 1) <= data_end) {
@@ -182,15 +180,15 @@ int xdp_prog(struct xdp_md *ctx) {
                     }
                 }
             }
-            /* DNS Telemetry Hint */
+            /* DNS Answer Count Extraction (RFC 1035) */
             if (sport == bpf_htons(53) || dport == bpf_htons(53)) {
                 void *dns = l4_h + 8; if (dns + 8 <= data_end) dns_ans = bpf_ntohs(*(uint16_t *)(dns + 6));
             }
         }
-    } else if (l4_p == 1 || l4_p == 58) { /* ICMP/v6 */
+    } else if (l4_p == 1 || l4_p == 58) { /* ICMP/v6 RFC 792/4443 */
         struct icmphdr *icmp = l4_h; if ((void *)(icmp + 1) <= data_end) {
             sport = icmp->type; dport = icmp->code; h_len += 8;
-            /* ICMP Echo ID Flow Separation */
+            /* ICMP Echo ID Extraction for Flow Separation */
             if (icmp->type == 8 || icmp->type == 0 || icmp->type == 128 || icmp->type == 129) {
                 struct { uint8_t t; uint8_t c; uint16_t k; uint16_t id; uint16_t s; } *echo = l4_h;
                 if ((void *)(echo + 1) <= data_end) sport = echo->id;
@@ -201,6 +199,7 @@ int xdp_prog(struct xdp_md *ctx) {
     struct flow_key key = {0}; key.protocol = l4_p; key.src_port = sport; key.dst_port = dport;
     __builtin_memcpy(key.src_ip, src, 16); __builtin_memcpy(key.dst_ip, dst, 16);
 
+    /* Bidirectional Flow Registry Lookup */
     struct flow_meta *meta = bpf_map_lookup_elem(&flow_registry, &key);
     uint8_t is_fwd = 1;
     if (!meta) {
@@ -217,6 +216,7 @@ int xdp_prog(struct xdp_md *ctx) {
         meta = bpf_map_lookup_elem(&flow_registry, &key);
     }
 
+    /* Core-Private Telemetry Dispatch */
     uint32_t cpu = bpf_get_smp_processor_id();
     int *rb_fd = bpf_map_lookup_elem(&pkt_ringbuf_map, &cpu);
     if (!rb_fd) return XDP_PASS;

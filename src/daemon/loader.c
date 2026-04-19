@@ -1,6 +1,19 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator (v2.7 - The 399).
+ * @brief Lynceus Control Plane - Parallel Flow-Level Statistical Orchestrator.
+ * 
+ * @details 
+ * Implements a high-performance, flow-level telemetry aggregator using a 
+ * Shared-Nothing architecture. This engine extracts a non-redundant matrix 
+ * of 399 scientific features (NTL+AL parity) using numerically stable online 
+ * algorithms.
+ * 
+ * Key Pillars:
+ * 1. **Numerical Stability**: Welford algorithm for 4th-order central moments.
+ * 2. **Shared-Nothing I/O**: Mutex-free partitioning per CPU core.
+ * 3. **Micro-Segmentation**: State-driven flushing every 100 packets ($N=100$).
+ * 
+ * @author Leonardo Herkenhoff (Senior Research Partner)
  */
 
 #define _GNU_SOURCE
@@ -23,25 +36,35 @@
 #include <errno.h>
 #include <sys/stat.h>
 
+/** @brief Flow Engine Configuration */
 #define FLOW_HASH_SIZE 131072
 #define IO_BUFFER_SIZE (8 * 1024 * 1024)
 #define IDLE_TIMEOUT_NS 60000000000ULL 
 #define IDLE_THRESHOLD 1.0
 #define SEGMENT_THRESHOLD 100 
-#define HIST_BINS 80 /**< Adjusted for 399 Feature Parity */
+#define HIST_BINS 80 /**< Calibrated for MTU 1500 with 20-byte resolution */
 
+/**
+ * @brief Bidirectional Flow Identification.
+ */
 struct flow_key {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
     uint16_t src_port; uint16_t dst_port;
     uint8_t protocol;
 } __attribute__((packed));
 
+/**
+ * @brief Initial Flow Context.
+ */
 struct flow_meta {
     uint64_t start_time;
     uint8_t ip_ver; uint16_t eth_proto;
     uint8_t src_mac[6]; uint8_t dst_mac[6];
 } __attribute__((packed));
 
+/**
+ * @brief Unified eBPF Telemetry Event.
+ */
 struct packet_event_t {
     struct flow_key key;
     struct flow_meta meta;
@@ -54,12 +77,29 @@ struct packet_event_t {
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
+/**
+ * @brief Welford Online Accumulator.
+ * @details Tracks central moments ($M_1$ to $M_4$) for numerically stable 
+ * calculation of Variance, Skewness, and Kurtosis in $O(1)$.
+ */
 struct w_stat {
-    uint64_t n; double M1, M2, M3, M4; uint32_t max, min;
-    uint64_t hist[HIST_BINS];
+    uint64_t n;         /**< Sample count */
+    double M1, M2, M3, M4; /**< Central moments (Running sums) */
+    uint32_t max, min;  /**< Extrema values */
+    uint64_t hist[HIST_BINS]; /**< Distribution histograms */
 };
 
+/**
+ * @brief Initializes a Welford accumulator.
+ */
 static void w_init(struct w_stat *w) { memset(w, 0, sizeof(*w)); w->min = 0xFFFFFFFF; }
+
+/**
+ * @brief Updates Welford moments with a new sample $x$.
+ * @details Uses the update rules for central moments to ensure numerical precision.
+ * $\Delta = x - M_1$
+ * $M_1 = M_1 + \frac{\Delta}{n}$
+ */
 static inline void w_update(struct w_stat *w, double x) {
     uint64_t n1 = w->n; w->n++;
     double delta = x - w->M1, delta_n = delta / w->n, delta_n2 = delta_n * delta_n, term1 = delta * delta_n * n1;
@@ -76,6 +116,11 @@ static inline double w_std(struct w_stat *w) { return sqrt(w_var(w)); }
 static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
 static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
 
+/**
+ * @brief High-Density Flow State.
+ * @details Consolidation of 399 features including statistical moments, 
+ * histograms, and L7 metadata.
+ */
 struct flow_state {
     struct flow_key key; struct flow_meta meta;
     struct w_stat t_pay, f_pay, b_pay, t_hdr, f_hdr, b_hdr, t_iat, f_iat, b_iat, active_s, idle_s, win_s;
@@ -92,6 +137,10 @@ struct flow_state {
     int active;
 };
 
+/**
+ * @brief Worker Thread Context.
+ * @details Maintains partitioned state for zero-contention I/O.
+ */
 struct worker_t {
     pthread_t thread; int rb_fd; struct ring_buffer *rb;
     struct flow_state *flow_table; FILE *out_f;
@@ -103,11 +152,17 @@ static int num_workers = 1;
 static volatile bool exiting = false;
 static void sig_handler(int sig) { (void)sig; exiting = true; }
 
+/**
+ * @brief High-precision monotonic timestamp.
+ */
 static uint64_t get_nstime(void) {
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+/**
+ * @brief Calculates Shannon Entropy for payload analysis.
+ */
 static double calculate_entropy(const uint8_t *data, size_t len) {
     if (len == 0) return 0;
     uint64_t counts[256] = {0}; for (size_t i = 0; i < len; i++) counts[data[i]]++;
@@ -116,6 +171,9 @@ static double calculate_entropy(const uint8_t *data, size_t len) {
     return ent;
 }
 
+/**
+ * @brief Serializes and flushes a flow to the core-private CSV.
+ */
 static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns) {
     char sip[64], dip[64];
     if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &s->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &s->key.dst_ip[12], dip, 64); }
@@ -132,6 +190,11 @@ static void flush_flow(struct worker_t *w, struct flow_state *s, uint64_t ts_ns)
     if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
 }
 
+/**
+ * @brief Callback for processing telemetry events from the RingBuffer.
+ * @details Implements flow state transition logic, bulk detection, and 
+ * segmented aggregation ($N=100$).
+ */
 static int handle_event(void *ctx, void *data, size_t data_sz) {
     (void)data_sz; struct worker_t *w = ctx; const struct packet_event_t *e = data;
     uint32_t h = 0; const uint8_t *p = (const uint8_t *)&e->key;
@@ -185,6 +248,10 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     return 0;
 }
 
+/**
+ * @brief Worker thread loop.
+ * @details Implements CPU affinity pinning and manages core-private I/O streams.
+ */
 void *worker_fn(void *arg) {
     struct worker_t *w = arg; cpu_set_t cpuset; CPU_ZERO(&cpuset); CPU_SET(w->id % 256, &cpuset);
     pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
@@ -213,6 +280,11 @@ void *worker_fn(void *arg) {
     return NULL;
 }
 
+/**
+ * @brief Orchestrator Main.
+ * @details Performs dynamic CPU detection, instantiates core-private 
+ * RingBuffers, and attaches XDP programs to the specified interfaces.
+ */
 int main(int argc, char **argv) {
     if (argc < 2) return 1; struct rlimit r = {RLIM_INFINITY, RLIM_INFINITY}; setrlimit(RLIMIT_MEMLOCK, &r);
     signal(SIGINT, sig_handler); signal(SIGTERM, sig_handler);
