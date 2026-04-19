@@ -28,6 +28,7 @@
 #include <net/if.h>
 #include <linux/if_link.h>
 #include <time.h>
+#include <errno.h>
 
 struct flow_event_t {
     uint8_t src_ip[16]; uint8_t dst_ip[16];
