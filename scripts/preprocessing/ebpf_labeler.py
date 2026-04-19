@@ -30,13 +30,9 @@ def process_file_auto(file_path):
     Applies the topological labeling rule to a single extraction result.
     """
     try:
-        filename = os.path.basename(file_path)
-        # Category is two levels up for partitioned IO (category/rel_path/file)
-        # or one level up for legacy.
-        path_parts = file_path.split(os.sep)
-        # Find category by searching after INPUT_DIR
-        input_parts = INPUT_DIR.split(os.sep)
-        category = path_parts[len(input_parts)]
+        # Category is the first directory component after INPUT_DIR
+        rel_from_input = os.path.relpath(file_path, INPUT_DIR)
+        category = rel_from_input.split(os.sep)[0]
         
         rel_path = os.path.relpath(os.path.dirname(file_path), INPUT_DIR)
         output_folder = os.path.join(OUTPUT_DIR, rel_path)

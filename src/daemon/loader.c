@@ -294,7 +294,8 @@ int main(int argc, char **argv) {
     int cores = sysconf(_SC_NPROCESSORS_ONLN); num_workers = cores;
     workers = calloc(num_workers, sizeof(struct worker_t));
     struct bpf_object *obj = bpf_object__open_file("build/main.bpf.o", NULL);
-    if (!obj || bpf_object__load(obj)) return 1;
+    if (!obj) { fprintf(stderr, "❌ Failed to open eBPF object file\n"); return 1; }
+    if (bpf_object__load(obj)) { fprintf(stderr, "❌ Failed to load eBPF object into kernel\n"); return 1; }
     int outer_fd = bpf_object__find_map_fd_by_name(obj, "pkt_ringbuf_map");
     for (int i = 0; i < num_workers; i++) {
         workers[i].id = i; 
@@ -305,7 +306,12 @@ int main(int argc, char **argv) {
     fprintf(stderr, "🚀 [Lynceus Core] %d Workers (Scientific 399 Ready)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
-    for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
+    if (!p) { fprintf(stderr, "❌ Failed to find XDP program in object\n"); return 1; }
+    for (int i = 1; i < argc; i++) {
+        int ifindex = if_nametoindex(argv[i]);
+        if (ifindex == 0) { fprintf(stderr, "❌ Interface %s not found\n", argv[i]); return 1; }
+        if (bpf_program__attach_xdp(p, ifindex) < 0) { fprintf(stderr, "❌ Failed to attach XDP to %s\n", argv[i]); return 1; }
+    }
     for (int i = 0; i < num_workers; i++) pthread_join(workers[i].thread, NULL);
     bpf_object__close(obj); return 0;
 }
