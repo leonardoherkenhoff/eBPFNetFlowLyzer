@@ -61,6 +61,7 @@ struct packet_event_t {
     __u8 ttl; __u8 is_fwd;
     __u64 timestamp_ns;
     __u8 icmp_type; __u8 icmp_code;
+    __u16 dns_answer_count;
     __u8 payload_hint[PAYLOAD_HINT_SIZE];
 } __attribute__((packed));
 
@@ -133,7 +134,10 @@ int xdp_prog(struct xdp_md *ctx) {
 
     key.protocol = l4_proto;
 
-    /* Dissecção de Camada 4 (TCP/UDP) */
+    __u8 icmp_type = 0, icmp_code = 0;
+    __u16 dns_ans_cnt = 0;
+
+    /* Dissecção de Camada 4 (TCP/UDP/ICMP) */
     if (l4_proto == 6) { /* TCP */
         struct tcphdr *tcp = l4_hdr; if ((void *)(tcp + 1) <= data_end) {
             key.src_port = tcp->source; key.dst_port = tcp->dest;
@@ -143,7 +147,15 @@ int xdp_prog(struct xdp_md *ctx) {
     } else if (l4_proto == 17) { /* UDP */
         struct udphdr *udp = l4_hdr; if ((void *)(udp + 1) <= data_end) {
             key.src_port = udp->source; key.dst_port = udp->dest; header_len += 8;
+            /* Extração de Características DNS (Porta 53) */
+            if (bpf_ntohs(udp->source) == 53 || bpf_ntohs(udp->dest) == 53) {
+                struct { __u16 id; __u16 flags; __u16 qd; __u16 an; __u16 ns; __u16 ar; } *dns = (void *)(udp + 1);
+                if ((void *)(dns + 1) <= data_end) dns_ans_cnt = bpf_ntohs(dns->an);
+            }
         }
+    } else if (l4_proto == 1 || l4_proto == 58) { /* ICMPv4 / ICMPv6 */
+        struct { __u8 type; __u8 code; __u16 cksum; } *icmp = l4_hdr;
+        if ((void *)(icmp + 1) <= data_end) { icmp_type = icmp->type; icmp_code = icmp->code; }
     }
 
     /* Normalização de Fluxo Bidirecional */
@@ -175,6 +187,8 @@ int xdp_prog(struct xdp_md *ctx) {
             ev->payload_len = (data_end - data) - header_len; ev->header_len = header_len;
             ev->window_size = window; ev->tcp_flags = tcp_flags; ev->ttl = ttl;
             ev->is_fwd = is_fwd; ev->timestamp_ns = bpf_ktime_get_ns();
+            ev->icmp_type = icmp_type; ev->icmp_code = icmp_code;
+            ev->dns_answer_count = dns_ans_cnt;
             
             /* Hint L7: Primeiros 64 bytes para análise de Entropia */
             void *payload = data + header_len + sizeof(struct ethhdr);
