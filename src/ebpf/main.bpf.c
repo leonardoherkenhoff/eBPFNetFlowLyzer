@@ -1,6 +1,6 @@
 /**
  * @file main.bpf.c
- * @brief eBPF Data Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.8).
+ * @brief eBPF Data Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.13).
  * 
  * @details 
  * Arquitetura massivamente paralela baseada em Dynamic Map-in-Map RingBuffers.
@@ -14,7 +14,7 @@
  * 3. Fidelidade de Dados: Exportação atômica de eventos 'packet_event_t' para o
  *    ciclo autonômico MAPE-K em user-space.
  * 
- * @version 1.9.8 (Research Milestone 3 - Final)
+ * @version 1.9.13 (Research Milestone 3 - Final Run Edition)
  */
 
 #include "vmlinux.h"

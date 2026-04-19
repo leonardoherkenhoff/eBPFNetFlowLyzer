@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-ebpf_labeler.py - Research Post-Processing - Topological Ground Truth Attribution (v1.9.12).
+ebpf_labeler.py - Research Post-Processing - Topological Ground Truth Attribution (v1.9.13).
 ------------------------------------------------------------------------------------------
-v1.9.12 Enhancements:
-- Target-Specific Labeling: Added CLI arguments for iterative category processing.
-- Multi-Worker Support: Now handles partitioned worker CSVs (v1.9.11) natively.
+v1.9.13 Enhancements:
+- Target-Specific Labeling: CLI arguments for iterative category processing.
+- Multi-Worker Support: Handles partitioned worker CSVs (v1.9.11) natively.
 - Automatic Deletion: Supports post-labeling cleanup to preserve disk space.
 """
 

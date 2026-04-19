@@ -1,13 +1,13 @@
 /**
  * @file loader.c
- * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.10).
+ * @brief User-Space Control Plane - Milestone 3: Dynamic Shared-Nothing Extractor (v1.9.13).
  * 
  * @details 
  * Orquestrador de telemetria massivamente paralelo com arquitetura Partitioned I/O.
  * Esta versão elimina o Mutex de escrita global, permitindo que cada core de CPU
  * atue como um extrator autônomo e independente, maximizando a vazão do Xeon.
  * 
- * Formalismo de Engenharia (v1.9.10):
+ * Formalismo de Engenharia (v1.9.13):
  * 1. Zero-Contention I/O: Cada Worker $W_i$ possui seu próprio file descriptor
  *    e buffer de 2MB, eliminando locks de sistema de arquivos e contenção de mutex.
  * 2. Isolamento de Caminhos: Utiliza 'worker_telemetry/' para evitar colisões
@@ -15,7 +15,7 @@
  * 3. Integridade Total: Acumuladores de eventos por core garantem a rastreabilidade
  *    de perda zero exigida para o treinamento de modelos de ML em DDoS.
  * 
- * @version 1.9.10 (High-Fidelity / Partitioned I/O / Path Safe)
+ * @version 1.9.13 (High-Fidelity / Partitioned I/O / Final Run)
  */
 
 #define _GNU_SOURCE

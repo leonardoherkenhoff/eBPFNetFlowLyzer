@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.12)
+eBPFNetFlowLyzer - Extraction Wrapper & Testbed Orchestrator (v1.9.13)
 -----------------------------------------------------------
-v1.9.12 Iterative Storage Management:
+v1.9.13 Iterative Storage Management:
 - "Extract-Label-Purge" Strategy: Integrates labelling and cleanup into the loop.
+- Post-Extraction Flush Resilience: Increased timeout for 48-core buffer flushing.
 - Ensures the 180GB benchmark fits in the 586GB partition.
 """
 
