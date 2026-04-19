@@ -21,7 +21,7 @@ The name is inspired by **Lynceus**, the Argonaut possessing legendary vision. I
 *   **Elastic N-Core Scalability**: Automatically detects host topology and instantiates a dynamic **Map-in-Map** structure for lockless, core-private ingestion.
 *   **Zero-Contention Partitioned I/O**: Decentralized multi-threaded persistence where each CPU core writes to its own isolated stream, bypassing global filesystem locks.
 *   **High-Fidelity Statistical Suite**: Numerically stable $O(1)$ calculation of 4th-order moments (Mean, Variance, Skewness, Kurtosis) using Welford's Algorithm.
-*   **Protocol-Agnostic Introspection**: Full support for IPv4/IPv6 and multi-protocol (TCP/UDP/ICMP/ICMPv6) flow analysis without performance degradation.
+*   **Protocol-Agnostic Introspection**: Full high-fidelity support for IPv4/IPv6 and multi-protocol flow analysis, including deep dissection for **TCP, UDP, ICMP, ICMPv6, IGMP, SCTP, and GRE**.
 
 ---
 
