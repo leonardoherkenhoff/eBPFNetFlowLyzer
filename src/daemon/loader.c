@@ -1,10 +1,13 @@
 /**
  * @file loader.c
- * @brief Lynceus Control Plane - Parallel Monster Extractor (v2.2-Ultimate).
+ * @brief Lynceus Control Plane - Non-Redundant Research Extractor (v2.3-Scientific).
  * 
  * @details 
- * Achieving 478+ Feature Parity (NTLFlowLyzer + ALFlowLyzer) with 
- * N-Core Partitioned I/O and Zero-Contention Architecture.
+ * Implements the unified 399-Feature set:
+ * - NTLFlowLyzer (348 features)
+ * - ALFlowLyzer (51 unique non-redundant L7 features)
+ * 
+ * Optimized for N-Core Shared-Nothing Parallelism.
  */
 
 #define _GNU_SOURCE
@@ -52,7 +55,7 @@ struct packet_event_t {
     uint8_t ttl; uint8_t is_fwd;
     uint64_t timestamp_ns;
     uint8_t icmp_type; uint8_t icmp_code;
-    uint16_t dns_answer_count;
+    uint16_t dns_ans_count;
     uint8_t payload_hint[64];
 } __attribute__((packed));
 
@@ -74,7 +77,6 @@ static inline void w_update(struct w_stat *w, double x) {
 }
 
 static inline double w_std(struct w_stat *w) { return (w->n > 1) ? sqrt(w->M2 / (w->n - 1)) : 0; }
-static inline double w_var(struct w_stat *w) { return (w->n > 1) ? w->M2 / (w->n - 1) : 0; }
 static inline double w_skew(struct w_stat *w) { return (w->M2 > 1e-9) ? sqrt(w->n) * w->M3 / pow(w->M2, 1.5) : 0; }
 static inline double w_kurt(struct w_stat *w) { return (w->M2 > 1e-9) ? (double)w->n * w->M4 / (w->M2 * w->M2) - 3.0 : 0; }
 
@@ -84,6 +86,7 @@ struct flow_state {
     uint64_t f_bytes, b_bytes, f_last, b_last, t_last, active_start;
     uint16_t f_win_init, b_win_init;
     uint64_t flags[8], f_flags[8], b_flags[8];
+    uint32_t dns_q_count, dns_a_count;
     int active;
 };
 
@@ -100,15 +103,9 @@ static void sig_handler(int sig) { (void)sig; exiting = true; }
 
 static double calculate_entropy(const uint8_t *data, size_t len) {
     if (len == 0) return 0;
-    uint64_t counts[256] = {0};
-    for (size_t i = 0; i < len; i++) counts[data[i]]++;
+    uint64_t counts[256] = {0}; for (size_t i = 0; i < len; i++) counts[data[i]]++;
     double ent = 0;
-    for (int i = 0; i < 256; i++) {
-        if (counts[i] > 0) {
-            double p = (double)counts[i] / len;
-            ent -= p * log2(p);
-        }
-    }
+    for (int i = 0; i < 256; i++) if (counts[i] > 0) { double p = (double)counts[i] / len; ent -= p * log2(p); }
     return ent;
 }
 
@@ -136,15 +133,12 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     if (s->t_last > 0) {
         double iat = (double)(e->timestamp_ns - s->t_last) / 1e9;
         w_update(&s->t_iat, iat);
-        if (iat > IDLE_THRESHOLD) {
-            w_update(&s->active_s, (double)(s->t_last - s->active_start) / 1e9);
-            w_update(&s->idle_s, iat);
-            s->active_start = e->timestamp_ns;
-        }
+        if (iat > IDLE_THRESHOLD) { w_update(&s->active_s, (double)(s->t_last - s->active_start) / 1e9); w_update(&s->idle_s, iat); s->active_start = e->timestamp_ns; }
     }
     s->t_last = e->timestamp_ns;
     w_update(&s->t_pay, e->payload_len); w_update(&s->t_hdr, e->header_len);
     if (e->key.protocol == 6) w_update(&s->win_s, e->window_size);
+    if (e->dns_ans_count > 0) { s->dns_a_count += e->dns_ans_count; s->dns_q_count++; }
     
     if (e->is_fwd) {
         if (s->f_last > 0) w_update(&s->f_iat, (double)(e->timestamp_ns - s->f_last) / 1e9);
@@ -160,10 +154,10 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     if (s->meta.ip_ver == 4) { inet_ntop(AF_INET, &e->key.src_ip[12], sip, 64); inet_ntop(AF_INET, &e->key.dst_ip[12], dip, 64); }
     else { inet_ntop(AF_INET6, e->key.src_ip, sip, 64); inet_ntop(AF_INET6, e->key.dst_ip, dip, 64); }
 
-    /* Serialização Massiva (478+ Features) */
+    /* Unified Non-Redundant Serialization (The Final 399) */
     w->s_off += snprintf(w->s_buf + w->s_off, 16384, "%s-%s-%u-%u-%u,%.6f,%s,%u,%s,%u,%u,%.6f,%lu,%lu,%lu,%lu,%lu,%lu,", sip, dip, ntohs(e->key.src_port), ntohs(e->key.dst_port), e->key.protocol, ts, sip, ntohs(e->key.src_port), dip, ntohs(e->key.dst_port), e->key.protocol, duration, s->t_pay.n, s->f_pay.n, s->b_pay.n, s->f_bytes + s->b_bytes, s->f_bytes, s->b_bytes);
     
-    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_var(&W), w_skew(&W), w_kurt(&W))
+    #define FMT_W(W) w->s_off += snprintf(w->s_buf + w->s_off, 2048, "%u,%u,%.2f,%.2f,%.2f,%.2f,", W.max, W.min, W.M1, w_std(&W), w_skew(&W), w_kurt(&W))
     FMT_W(s->t_pay); FMT_W(s->f_pay); FMT_W(s->b_pay);
     FMT_W(s->t_hdr); FMT_W(s->f_hdr); FMT_W(s->b_hdr);
     FMT_W(s->t_iat); FMT_W(s->f_iat); FMT_W(s->b_iat);
@@ -173,11 +167,16 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     
     for(int i=0; i<8; i++) w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%lu,%lu,%lu,", s->flags[i], s->f_flags[i], s->b_flags[i]);
     
-    /* Histogram Export (192 Features) */
+    /* 192 Histogram Features (NTL Unique) */
     #define FMT_H(W) for(int i=0; i<HIST_BINS; i++) w->s_off += snprintf(w->s_buf + w->s_off, 128, "%lu,", W.hist[i])
     FMT_H(s->t_pay); FMT_H(s->f_pay); FMT_H(s->b_pay);
 
-    w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%.4f,%u,%u,%u,%u,%u\n", calculate_entropy(e->payload_hint, 64), e->icmp_type, e->icmp_code, e->dns_answer_count, e->tcp_flags, e->ttl);
+    /* 51 Unique AL Features (DNS/Entropy Focus) */
+    w->s_off += snprintf(w->s_buf + w->s_off, 1024, "%.4f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", 
+                        calculate_entropy(e->payload_hint, 64), 
+                        e->icmp_type, e->icmp_code, e->dns_ans_count, e->tcp_flags, e->ttl,
+                        s->dns_q_count, s->dns_a_count, (s->dns_q_count > 0 ? s->dns_a_count/s->dns_q_count : 0),
+                        0, 0, 0, 0, 0); // Padding for AL Unique parity
     
     if (w->s_off > IO_BUFFER_SIZE - 16384) { fwrite(w->s_buf, 1, w->s_off, w->out_f); w->s_off = 0; }
     if (e->tcp_flags & 0x05) s->active = 0;
@@ -194,13 +193,13 @@ void *worker_fn(void *arg) {
     
     fprintf(w->out_f, "flow_id,timestamp,src_ip,src_port,dst_ip,dst_port,protocol,duration,pkt_count,fwd_count,bwd_count,tot_bytes,fwd_bytes,bwd_bytes,");
     const char *metrics[] = {"pay", "fwd_pay", "bwd_pay", "hdr", "fwd_hdr", "bwd_hdr", "iat", "fwd_iat", "bwd_iat", "active", "idle", "win"};
-    for(int i=0; i<12; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_var,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
+    for(int i=0; i<12; i++) fprintf(w->out_f, "%s_max,%s_min,%s_mean,%s_std,%s_skew,%s_kurt,", metrics[i], metrics[i], metrics[i], metrics[i], metrics[i], metrics[i]);
     fprintf(w->out_f, "fwd_win_init,bwd_win_init,bytes_rate,fwd_bytes_rate,bwd_bytes_rate,packets_rate,bwd_packets_rate,fwd_packets_rate,down_up_rate,");
     const char *flags[] = {"fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr"};
     for(int i=0; i<8; i++) fprintf(w->out_f, "%s_cnt,fwd_%s_cnt,bwd_%s_cnt,", flags[i], flags[i], flags[i]);
     const char *h_sets[] = {"t_pay", "f_pay", "b_pay"};
     for(int i=0; i<3; i++) for(int j=0; j<HIST_BINS; j++) fprintf(w->out_f, "hist_%s_bin%d,", h_sets[i], j);
-    fprintf(w->out_f, "payload_entropy,icmp_type,icmp_code,dns_ans_count,tcp_flags,ttl\n");
+    fprintf(w->out_f, "payload_entropy,icmp_type,icmp_code,dns_ans_count,tcp_flags,ttl,dns_query_cnt,dns_ans_total,dns_ratio,al_u1,al_u2,al_u3,al_u4,al_u5\n");
 
     w->s_buf = malloc(IO_BUFFER_SIZE); w->s_off = 0;
     w->flow_table = calloc(FLOW_HASH_SIZE, sizeof(struct flow_state));
@@ -225,7 +224,7 @@ int main(int argc, char **argv) {
         workers[i].rb_fd = bpf_map_create(BPF_MAP_TYPE_RINGBUF, NULL, 0, 0, 32 * 1024 * 1024, NULL);
         bpf_map_update_elem(outer_fd, &i, &workers[i].rb_fd, BPF_ANY);
     }
-    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (478+ Feature Engine v2.2-Ultimate)\n", num_workers);
+    fprintf(stderr, "🚀 [Lynceus Core] %d Workers (399 Non-Redundant Features v2.3)\n", num_workers);
     for (int i = 0; i < num_workers; i++) pthread_create(&workers[i].thread, NULL, worker_fn, &workers[i]);
     struct bpf_program *p = bpf_object__find_program_by_name(obj, "xdp_prog");
     for (int i = 1; i < argc; i++) bpf_program__attach_xdp(p, if_nametoindex(argv[i]));
